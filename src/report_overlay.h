@@ -9,5 +9,9 @@ extern bool g_report_open;
 // `blob` records are separated by 0x1E, fields by 0x1F (see PacketHelpers.h).
 void report_set_data(int mode, const std::string& blob);
 
+// Open the overlay immediately (main thread), before data arrives. Shows a
+// "loading" state until report_set_data() fills it in from the server.
+void report_open_pending();
+
 void report_render(int W, int H);
 bool report_on_key(int key, int action);

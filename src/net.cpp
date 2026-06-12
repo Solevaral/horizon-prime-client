@@ -96,6 +96,17 @@ void network_thread_func(const std::string& host, const std::string& port) {
         g_connected   = true;
         g_conn_status = ConnStatus::ONLINE;
 
+        // Announce our protocol version first; the server rejects mismatches.
+        {
+            std::vector<char> hello(sizeof(PacketHeader) + sizeof(uint32_t), 0);
+            auto* h = reinterpret_cast<PacketHeader*>(hello.data());
+            h->type     = MsgType::C_HELLO;
+            h->body_len = htons(sizeof(uint32_t));
+            uint32_t ver = htonl(PROTOCOL_VERSION);
+            std::memcpy(hello.data() + sizeof(PacketHeader), &ver, sizeof(uint32_t));
+            net_send(hello.data(), hello.size());
+        }
+
         auto read_exact = [&](void* dst, size_t n) {
             asio::read(socket, asio::buffer(dst, n));
         };

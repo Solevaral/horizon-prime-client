@@ -294,7 +294,7 @@ void settings_render(int W, int H) {
     case 0: desc = ru ? "  Язык игры: ENG / RU" : "  Game language: ENG / RU"; break;
     case 1: desc = ru ? "  Показывать лого дня при каждом входе"
                       : "  Show the daily logo on every login"; break;
-    case 2: desc = ru ? "  Включить/выключить звуки (экспериментально)"
+    case 2: desc = ru ? "  Включить/выключить звуки (Beta)"
                       : "  Enable/disable sounds (experimental)"; break;
     case 3: desc = ru ? "  Громкость звука (1-10)" : "  Sound volume (1-10)"; break;
     case 4: desc = ru ? "  Включить/выключить растровые линии на экране"

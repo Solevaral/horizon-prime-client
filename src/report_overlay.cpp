@@ -29,6 +29,15 @@ static int                    g_mode = 0;       // 0=staff, 1=player
 static std::vector<ReportRow> g_rows;
 static int                    g_sel = 0;
 static int                    g_scroll = 0;     // first visible row index
+static bool                   g_loading = false; // open but data not yet arrived
+
+void report_open_pending() {
+    g_rows.clear();
+    g_sel = 0;
+    g_scroll = 0;
+    g_loading = true;
+    g_report_open = true;
+}
 
 // Split helper on a single-byte delimiter.
 static std::vector<std::string> split(const std::string& s, char d) {
@@ -70,6 +79,7 @@ void report_set_data(int mode, const std::string& blob) {
         }
         g_rows.push_back(row);
     }
+    g_loading = false;
     g_report_open = true;
 }
 
@@ -137,6 +147,10 @@ void report_render(int W, int H) {
     term_draw_string(win_x + win_w - pad - hint_w, ty, hint, 0.35f, 0.50f, 0.75f, 1.0f);
     ty += ch + 8.0f;
 
+    if (g_loading) {
+        term_draw_string(win_x + pad, ty, "  Loading...", 0.6f, 0.6f, 0.6f, 1.0f);
+        return;
+    }
     if (g_rows.empty()) {
         term_draw_string(win_x + pad, ty,
             (g_mode == 0) ? "  No open reports." : "  You have no reports yet.",

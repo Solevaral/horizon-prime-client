@@ -852,6 +852,25 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
                     g_scroll_offset = 0;
                     return;
                 }
+                // "report" with no argument: open the overlay locally (in this
+                // thread, like settings) so it can't race the network thread,
+                // then ask the server to fill it with data.
+                if (lc == "report") {
+                    report_open_pending();   // opens g_report_open + shows "loading"
+                    sound_play(SoundEvent::CMD_SEND);
+                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
+                        g_cmd_history.push_back(g_input_buf);
+                    g_history_idx = -1; g_history_saved.clear();
+                    std::string echo;
+                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
+                    { std::lock_guard<std::mutex> lock(g_state_mutex);
+                      g_lines.push_back({echo, 120, 160, 120});
+                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
+                    g_input_buf.clear();
+                    g_scroll_offset = 0;
+                    net_send_input("report");  // server replies with S_REPORT_LIST
+                    return;
+                }
                 if (lc == "scr") {
                     g_scr_open = true;
                     sound_play(SoundEvent::CMD_CLEAR);
