@@ -1,0 +1,29 @@
+# Build output
+/build/
+/dist/
+/bin/
+/obj/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Dependencies
+/node_modules/
+package-lock.json
+yarn.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+.cache/
