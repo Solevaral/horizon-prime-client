@@ -46,6 +46,7 @@ extern std::mutex              g_state_mutex;
 // Player info (set on auth)
 extern uint32_t                g_player_id;
 extern std::string             g_player_nick;
+extern int                     g_player_access;  // 0=admin,1=mod,2=helper,3=user
 extern bool                    g_authed;
 
 // Terminal buffer

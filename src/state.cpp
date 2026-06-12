@@ -4,9 +4,10 @@ std::atomic<bool>       g_running   {true};
 std::atomic<bool>       g_connected {false};
 std::mutex              g_state_mutex;
 
-uint32_t                g_player_id   = 0;
+uint32_t                g_player_id     = 0;
 std::string             g_player_nick;
-bool                    g_authed      = false;
+int                     g_player_access = 3;  // default: user
+bool                    g_authed        = false;
 
 std::vector<TermLine>   g_lines;
 std::vector<ChatLine>   g_chat_lines;

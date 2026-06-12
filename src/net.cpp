@@ -2,11 +2,14 @@
 #include "state.h"
 #include "sound.h"
 #include "stat_overlay.h"
+#include "report_overlay.h"
 
 #include <cstring>
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <iostream>
+#include <iomanip>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -76,6 +79,9 @@ static void push_chat(const char* text, uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void network_thread_func(const std::string& host, const std::string& port) {
+    // Debug log to file
+    static FILE* dbg = fopen("net_debug.log", "w");
+    if (dbg) { fprintf(dbg, "network_thread started\n"); fflush(dbg); }
   while (g_running) {
     g_logout_requested = false;
     g_conn_status = ConnStatus::CONNECTING;
@@ -97,24 +103,36 @@ void network_thread_func(const std::string& host, const std::string& port) {
             PacketHeader hdr{};
             read_exact(&hdr, sizeof(hdr));
             uint16_t body_len = ntohs(hdr.body_len);
+            if (dbg) { fprintf(dbg, "[net] pkt type=0x%02x body_len=%u\n", (int)hdr.type, body_len); fflush(dbg); }
             std::vector<char> body(body_len, 0);
             if (body_len > 0) read_exact(body.data(), body_len);
 
             switch (hdr.type) {
 
             case MsgType::S_AUTH_OK: {
-                if (body.size() < sizeof(PktAuthOk) - sizeof(PacketHeader)) break;
-                // body layout: player_id(4), sector_x(4), sector_y(4), sector_z(4), nickname(...)
-                uint32_t pid = ntohl(*reinterpret_cast<uint32_t*>(body.data()));
+                if (dbg) { fprintf(dbg, "[net] S_AUTH_OK body=%zu need=%zu\n", body.size(), sizeof(PktAuthOk)-sizeof(PacketHeader)); fflush(dbg); }
+                // body: player_id(4)+sx(4)+sy(4)+sz(4)+access(4)+nickname(32) = 52
+                if (body.size() < 20) {
+                    if (dbg) { fprintf(dbg, "[net] S_AUTH_OK TOO SMALL\n"); fflush(dbg); }
+                    break;
+                }
+                // body layout: player_id(4), sector_x(4), sector_y(4), sector_z(4), access(4), nickname(32)
+                uint32_t pid; std::memcpy(&pid, body.data() +  0, 4); pid = ntohl(pid);
+                int32_t  sx;  std::memcpy(&sx,  body.data() +  4, 4); sx  = (int32_t)ntohl((uint32_t)sx);
+                int32_t  sy;  std::memcpy(&sy,  body.data() +  8, 4); sy  = (int32_t)ntohl((uint32_t)sy);
+                int32_t  sz;  std::memcpy(&sz,  body.data() + 12, 4); sz  = (int32_t)ntohl((uint32_t)sz);
+                uint32_t acc_raw; std::memcpy(&acc_raw, body.data() + 16, 4); int acc = (int)ntohl(acc_raw);
                 char nick[NICKNAME_MAX_LEN+1] = {};
-                std::memcpy(nick, body.data() + sizeof(uint32_t)*4, NICKNAME_MAX_LEN);
+                std::memcpy(nick, body.data() + 20, std::min((size_t)NICKNAME_MAX_LEN, body.size() - 20));
                 {
                     std::lock_guard<std::mutex> lock(g_state_mutex);
-                    g_player_id   = pid;
-                    g_player_nick = nick;
-                    g_authed      = true;
+                    g_player_id     = pid;
+                    g_player_access = acc;
+                    g_player_nick   = nick;
+                    g_authed        = true;
                     g_lines.clear();  // clear terminal on (re)login
                 }
+                if (dbg) { fprintf(dbg, "[net] -> TERMINAL acc=%d nick=%s\n", acc, nick); fflush(dbg); }
                 g_screen = Screen::TERMINAL;
                 sound_play(SoundEvent::AUTH_OK);
                 push_line("", 40, 40, 40);
@@ -189,10 +207,17 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 std::memcpy(text, body.data()+4, std::min(body.size()-4, (size_t)480));
                 push_line(text, r, g, b2, fl);
                 // OVERWRITE flag = warp in progress; plain text = warp ended
-                if (fl & TERM_FLAG_OVERWRITE)
+                if (fl & TERM_FLAG_OVERWRITE) {
                     g_warping = true;
-                else if (g_warping)
+                } else if (g_warping) {
                     g_warping = false;
+                    // Seal off the finished progress-bar line(s): drop the OVERWRITE
+                    // flag so the next warp starts a fresh bar at the bottom instead
+                    // of re-using this stale anchor higher up in the buffer.
+                    std::lock_guard<std::mutex> lock(g_state_mutex);
+                    for (auto& ln : g_lines)
+                        ln.flags &= ~TERM_FLAG_OVERWRITE;
+                }
                 break;
             }
 
@@ -295,6 +320,15 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 break;
             }
 
+            case MsgType::S_REPORT_LIST: {
+                if (!body.empty()) {
+                    uint8_t mode = (uint8_t)body[0];
+                    std::string blob(body.data() + 1, body.size() - 1);
+                    report_set_data(mode, blob);
+                }
+                break;
+            }
+
             case MsgType::S_WORLD_STATE: {
                 if (body.size() >= 2) {
                     uint16_t cnt = ntohs(*reinterpret_cast<uint16_t*>(body.data()));
@@ -307,6 +341,7 @@ void network_thread_func(const std::string& host, const std::string& port) {
             }
         }
     } catch (std::exception& e) {
+        if (dbg) { fprintf(dbg, "[net] EXCEPTION: %s\n", e.what()); fflush(dbg); }
         if (!g_logout_requested) {
             if (g_screen == Screen::TERMINAL) {
                 push_line((std::string("  [!] Connection lost: ") + e.what()).c_str(),

@@ -18,6 +18,7 @@ set(HP_CLIENT_SOURCES
     src/settings.cpp
     src/stat_overlay.cpp
     src/scrollback_overlay.cpp
+    src/report_overlay.cpp
 )
 
 if(WIN32)

@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "stat_overlay.h"
 #include "scrollback_overlay.h"
+#include "report_overlay.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -620,6 +621,13 @@ void terminal_render(int W, int H, float dt) {
         glDisable(GL_DEPTH_TEST);
         scr_render(W, H);
     }
+
+    // Report overlay (staff inbox / player view)
+    if (g_screen != Screen::LOGIN && g_report_open) {
+        set_ortho(W, H);
+        glDisable(GL_DEPTH_TEST);
+        report_render(W, H);
+    }
 }
 
 // ─── Input callbacks ──────────────────────────────────────────────────────────
@@ -662,6 +670,24 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             if (g_focused_login == 1 && !g_field_pass.empty()) g_field_pass.pop_back();
             return;
         }
+        if (key == GLFW_KEY_V && (mods & GLFW_MOD_CONTROL)) {
+            const char* clip = glfwGetClipboardString(win);
+            if (clip) {
+                std::string& field = (g_focused_login == 0) ? g_field_nick : g_field_pass;
+                int max_len = (g_focused_login == 0) ? NICKNAME_MAX_LEN - 1 : PASSWORD_MAX_LEN - 1;
+                for (const char* p = clip; *p && (int)field.size() < max_len; ++p) {
+                    // only printable ASCII for login fields
+                    if ((unsigned char)*p >= 32 && (unsigned char)*p < 127)
+                        field += *p;
+                }
+            }
+            return;
+        }
+        if (key == GLFW_KEY_A && (mods & GLFW_MOD_CONTROL)) {
+            if (g_focused_login == 0) g_field_nick.clear();
+            else                      g_field_pass.clear();
+            return;
+        }
         if ((key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER)
             && !g_field_nick.empty() && !g_field_pass.empty()) {
             if (g_conn_status != ConnStatus::ONLINE) {
@@ -682,6 +708,12 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             net_send_login(g_field_nick, g_field_pass, true);
             return;
         }
+        return;
+    }
+
+    // Report overlay has top priority while open
+    if (g_report_open) {
+        report_on_key(key, action);
         return;
     }
 
@@ -920,6 +952,88 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
         } else {
             g_history_idx = -1;
             g_input_buf = g_history_saved;
+        }
+        return;
+    }
+
+    // ── Tab autocomplete ──────────────────────────────────────────────────────
+    if (key == GLFW_KEY_TAB) {
+        // Build command list based on player access level
+        // g_player_access: 0=admin, 1=mod, 2=helper, 3=user
+        struct CmdEntry { const char* cmd; int min_access; };
+        static const CmdEntry ALL_CMDS[] = {
+            { "help",       3 },
+            { "who",        3 },
+            { "scan",       3 },
+            { "stat",       3 },
+            { "say",        3 },
+            { "warp",       3 },
+            { "scr",        3 },
+            { "clear",      3 },
+            { "stars",      3 },
+            { "settings",   3 },
+            { "logout",     3 },
+            { "exit",       3 },
+            { "report",     3 },
+            { "admin",      2 },  // helper+
+            { "admin help",     2 },
+            { "admin users",    2 },
+            { "admin who",      2 },
+            { "admin info",     2 },
+            { "admin logs",     2 },
+            { "admin kick",     2 },  // staff
+            { "admin mute",     2 },
+            { "admin unmute",   2 },
+            { "admin announce", 2 },
+            { "admin setaccess",0 },  // admin only
+            { "admin ban",      0 },  // admin only
+            { "admin unban",    0 },  // admin only
+            { "reply",          2 },  // staff
+        };
+
+        std::string prefix;
+        { std::lock_guard<std::mutex> lock(g_state_mutex); prefix = g_input_buf; }
+
+        // Lower-case prefix for matching
+        std::string lc_prefix = prefix;
+        for (auto& c : lc_prefix) c = (char)std::tolower((unsigned char)c);
+
+        std::vector<std::string> matches;
+        int access;
+        { std::lock_guard<std::mutex> lock(g_state_mutex); access = g_player_access; }
+        for (auto& e : ALL_CMDS) {
+            if (access > e.min_access) continue;  // not enough access
+            std::string ec = e.cmd;
+            if (ec.substr(0, lc_prefix.size()) == lc_prefix)
+                matches.push_back(ec);
+        }
+
+        if (matches.empty()) return;
+
+        if (matches.size() == 1) {
+            // Complete the input
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            g_input_buf = matches[0];
+        } else {
+            // Show all matches as a hint line in the terminal
+            std::string hint = "  ";
+            for (size_t i = 0; i < matches.size(); ++i) {
+                if (i) hint += "  ";
+                hint += matches[i];
+            }
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            g_lines.push_back({hint, 80, 120, 200});
+            if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin());
+
+            // Complete common prefix
+            std::string common = matches[0];
+            for (size_t i = 1; i < matches.size(); ++i) {
+                size_t j = 0;
+                while (j < common.size() && j < matches[i].size() && common[j] == matches[i][j]) ++j;
+                common = common.substr(0, j);
+            }
+            if (common.size() > lc_prefix.size())
+                g_input_buf = common;
         }
         return;
     }
