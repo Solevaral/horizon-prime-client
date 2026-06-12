@@ -190,6 +190,33 @@ static float string_width(const char* text) {
     return cx;
 }
 
+// Truncate UTF-8 string to fit within max_width pixels
+static std::string truncate_string(const char* text, float max_width) {
+    std::string result;
+    const uint8_t* p = (const uint8_t*)text;
+
+    while (*p && string_width(result.c_str()) < max_width) {
+        if (*p < 0x80) {
+            result += (char)*p++;
+        } else if ((*p & 0xE0) == 0xC0) {
+            result += (char)*p++;
+            if (*p) result += (char)*p++;
+        } else if ((*p & 0xF0) == 0xE0) {
+            result += (char)*p++;
+            if (*p) result += (char)*p++;
+            if (*p) result += (char)*p++;
+        } else if ((*p & 0xF8) == 0xF0) {
+            result += (char)*p++;
+            if (*p) result += (char)*p++;
+            if (*p) result += (char)*p++;
+            if (*p) result += (char)*p++;
+        } else {
+            result += (char)*p++;
+        }
+    }
+    return result;
+}
+
 // ─── Public font helpers (used by settings overlay) ───────────────────────────
 float term_draw_string(float x, float y, const char* text,
                        float r, float g, float b, float a) {
@@ -463,7 +490,9 @@ static void render_terminal(int W, int H, float dt) {
         float g = ln.g / 255.0f;
         float b = ln.b / 255.0f;
         float a = (ln.flags & 0x02) ? 0.55f : 1.0f;  // dim flag
-        draw_string(PAD_L, ty, ln.text.c_str(), r, g, b, a);
+        float max_text_width = (float)W - PAD_L - PAD_R;
+        std::string truncated = truncate_string(ln.text.c_str(), max_text_width);
+        draw_string(PAD_L, ty, truncated.c_str(), r, g, b, a);
         ty += g_cell_h;
     }
     (void)PAD_R;
@@ -497,7 +526,9 @@ static void render_terminal(int W, int H, float dt) {
     // Cursor blink
     double blink = std::fmod(glfwGetTime(), 1.0);
     std::string display = input + (blink < 0.55 ? "_" : " ");
-    draw_string(prompt_x, PROMPT_Y, display.c_str(), 0.85f,0.92f,1.0f);
+    float max_input_width = (float)W - prompt_x - PAD_R;
+    std::string truncated_input = truncate_string(display.c_str(), max_input_width);
+    draw_string(prompt_x, PROMPT_Y, truncated_input.c_str(), 0.85f,0.92f,1.0f);
 }
 
 // ─── Chat overlay panel ───────────────────────────────────────────────────────
@@ -911,4 +942,16 @@ void terminal_cb_mouse_button(GLFWwindow* win, int button, int action, int) {
     if (g_settings_open) {
         settings_on_mouse_button((float)mx, (float)my, button, action);
     }
+}
+
+void terminal_cb_scroll(GLFWwindow*, double /*xoffset*/, double yoffset) {
+    if (g_scr_open) {
+        scr_on_scroll(yoffset);
+        return;
+    }
+    // Scroll main terminal buffer
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+    int total = (int)g_lines.size();
+    int delta = (yoffset > 0) ? 3 : -3;
+    g_scroll_offset = std::clamp(g_scroll_offset + delta, 0, std::max(0, total - 1));
 }

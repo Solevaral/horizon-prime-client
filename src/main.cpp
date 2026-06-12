@@ -78,6 +78,7 @@ int main(int argc, char* argv[]) {
     glfwSetKeyCallback(win,         terminal_cb_key);
     glfwSetMouseButtonCallback(win, terminal_cb_mouse_button);
     glfwSetCursorPosCallback(win,   terminal_cb_cursor_pos);
+    glfwSetScrollCallback(win,      terminal_cb_scroll);
 
     double last_time = glfwGetTime();
 

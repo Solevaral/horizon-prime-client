@@ -13,6 +13,7 @@ void terminal_cb_char(GLFWwindow*, unsigned int codepoint);
 void terminal_cb_key(GLFWwindow*, int key, int scancode, int action, int mods);
 void terminal_cb_mouse_button(GLFWwindow*, int button, int action, int mods);
 void terminal_cb_cursor_pos(GLFWwindow*, double mx, double my);
+void terminal_cb_scroll(GLFWwindow*, double xoffset, double yoffset);
 
 // Public font helpers — used by settings overlay and other modules
 float term_draw_string(float x, float y, const char* text,
