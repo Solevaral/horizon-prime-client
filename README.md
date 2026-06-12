@@ -11,7 +11,7 @@ Horizon Prime is a sophisticated terminal client that connects to a remote serve
 ### Features
 
 - **Real-time Rendering**: Powered by OpenGL for hardware-accelerated graphics
-- **Custom Protocol**: Efficient binary communication with the server
+- **Custom Protocol**: Efficient binary communication with the server (version-checked on connect — keep the client up to date)
 - **Text-based UI**: Advanced text rendering with TrueType font support (stb_truetype), full UTF-8 / Cyrillic
 - **Scene Management**: Dynamic scene and animation system (starfield, warp)
 - **Overlays**: in-client settings, statistics, scrollback, and reports windows
