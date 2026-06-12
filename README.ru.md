@@ -2,7 +2,7 @@
 
 Современный клиент терминальной игры с поддержкой реал-тайм рендеринга через OpenGL и кастомного протокола.
 
-**[Read in English](README.md)**
+🌐 **Языки:** [English](README.md) | **Русский**
 
 ## Описание
 
@@ -24,19 +24,19 @@ Horizon Prime — это продвинутый терминальный кли�
 - OpenGL 3.3+
 - CMake 3.15+
 
-\\\ash
+```bash
 git clone https://github.com/yourusername/horizon-prime-client.git
 cd horizon-prime-client
 mkdir build && cd build
 cmake ..
 make
-\\\
+```
 
 ## Запуск
 
-\\\ash
+```bash
 ./horizon-prime-client --server localhost:9000
-\\\
+```
 
 ## Архитектура
 
@@ -53,7 +53,7 @@ make
 
 ## Лицензия
 
-[Добавить вашу лицензию]
+Этот проект лицензирован под MIT License - см. файл [LICENSE](LICENSE) для деталей.
 
 ## Автор
 

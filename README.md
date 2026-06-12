@@ -2,7 +2,7 @@
 
 A modern terminal-based game client featuring real-time rendering with OpenGL and custom protocol support.
 
-**[Read in Russian / Читать на русском](README.ru.md)**
+🌐 **Languages:** **English** | [Русский](README.ru.md)
 
 ## Overview
 
