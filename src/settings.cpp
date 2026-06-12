@@ -27,6 +27,7 @@ void settings_load(const std::string& path) {
         else if (key == "sound_volume") g_settings.sound_volume   = std::clamp(val, 1, 10);
         else if (key == "scanlines")    g_settings.scanlines       = (val != 0);
         else if (key == "scanline_bright") g_settings.scanline_bright = std::clamp(val, 1, 10);
+        else if (key == "term_buffer_size") g_settings.term_buffer_size = std::clamp(val, 30, 500);
     }
 }
 
@@ -37,6 +38,7 @@ void settings_save(const std::string& path) {
     f << "sound_volume "     << g_settings.sound_volume              << "\n";
     f << "scanlines "        << (g_settings.scanlines ? 1 : 0)       << "\n";
     f << "scanline_bright "  << g_settings.scanline_bright            << "\n";
+    f << "term_buffer_size " << g_settings.term_buffer_size          << "\n";
 }
 
 // ─── Overlay state ────────────────────────────────────────────────────────────
@@ -49,12 +51,13 @@ struct SettingRow {
 };
 
 static const SettingRow ROWS[] = {
-    { "Sounds",           SettingRow::TOGGLE, 0, 1  },
-    { "Sound Volume",     SettingRow::RANGE,  1, 10 },
-    { "Scanlines",        SettingRow::TOGGLE, 0, 1  },
-    { "Scanline Bright",  SettingRow::RANGE,  1, 10 },
+    { "Sounds (Beta)",       SettingRow::TOGGLE, 0, 1    },
+    { "Sound Volume",        SettingRow::RANGE,  1, 10   },
+    { "Scanlines",           SettingRow::TOGGLE, 0, 1    },
+    { "Scanline Bright",     SettingRow::RANGE,  1, 10   },
+    { "Terminal Buffer Size", SettingRow::RANGE,  30, 500 },
 };
-static constexpr int ROW_COUNT = 4;
+static constexpr int ROW_COUNT = 5;
 
 static int get_value(int idx) {
     switch (idx) {
@@ -62,6 +65,7 @@ static int get_value(int idx) {
     case 1: return g_settings.sound_volume;
     case 2: return g_settings.scanlines       ? 1 : 0;
     case 3: return g_settings.scanline_bright;
+    case 4: return g_settings.term_buffer_size;
     default: return 0;
     }
 }
@@ -72,6 +76,7 @@ static void set_value(int idx, int v) {
     case 1: g_settings.sound_volume     = std::clamp(v, 1, 10); break;
     case 2: g_settings.scanlines        = (v != 0); break;
     case 3: g_settings.scanline_bright  = std::clamp(v, 1, 10); break;
+    case 4: g_settings.term_buffer_size = std::clamp(v, 30, 500); break;
     }
 }
 
@@ -159,7 +164,8 @@ void settings_render(int W, int H) {
     const float ROW_H = ch + 12.0f;
     const float HDR_H = ch + 16.0f;
     const float PAD   = 20.0f;
-    const float WIN_H = HDR_H + PAD + ROW_COUNT * ROW_H + PAD + ROW_H; // +1 for close btn row
+    const float DESC_H = ch + 8.0f;  // description box
+    const float WIN_H = HDR_H + PAD + ROW_COUNT * ROW_H + PAD + DESC_H + PAD + ROW_H; // rows + desc + hint row
     const float WX    = (W - WIN_W) * 0.5f;
     const float WY    = (H - WIN_H) * 0.5f;
 
@@ -261,6 +267,22 @@ void settings_render(int W, int H) {
         term_draw_string(r_ax + 8.0f, vy, ">", focused ? 0.6f : 0.3f, focused ? 0.8f : 0.4f, 1.0f, 1.0f);
     }
 
+    // Description of focused setting
+    const char* desc = nullptr;
+    switch (s_selected) {
+    case 0: desc = "  Включить/выключить звуки (экспериментально)"; break;
+    case 1: desc = "  Громкость звука (1-10)"; break;
+    case 2: desc = "  Включить/выключить растровые линии на экране"; break;
+    case 3: desc = "  Яркость растровых линий (1-10)"; break;
+    case 4: desc = "  Объём буфера терминала: 30-500 строк  |  Больше = больше памяти"; break;
+    }
+    if (desc) {
+        float dh = ch + 6.0f;
+        float dy = WY + WIN_H - ROW_H - dh - 2.0f;
+        draw_rect(WX + 8, dy, WIN_W - 16, dh, 0.06f, 0.08f, 0.15f);
+        term_draw_string(WX + 16.0f, dy + 2.0f, desc, 0.50f, 0.65f, 0.80f, 1.0f);
+    }
+
     // Hint bar at bottom
     const char* hint = "\xe2\x86\x91\xe2\x86\x93 select   \xe2\x86\x90\xe2\x86\x92 / Enter change   Esc close";
     float hw = term_string_width(hint);
@@ -283,6 +305,7 @@ bool settings_on_key(int key, int action) {
     if (key == GLFW_KEY_ESCAPE) {
         g_settings_open = false;
         settings_save("settings.cfg");
+        g_term_buf_size = g_settings.term_buffer_size;  // sync to global
         if (g_settings.sounds_enabled) sound_play(SoundEvent::CMD_CLEAR);
         return true;
     }

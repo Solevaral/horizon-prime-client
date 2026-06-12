@@ -48,6 +48,7 @@ int main(int argc, char* argv[]) {
 
     setup_console_utf8();
     settings_load("settings.cfg");
+    g_term_buf_size = g_settings.term_buffer_size;  // sync global from settings
 
     std::thread net_thread(network_thread_func, host, port_str);
 

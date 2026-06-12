@@ -48,8 +48,17 @@ void net_send_input(const std::string& text) {
 // ─── Receive loop ─────────────────────────────────────────────────────────────
 static void push_line(const char* text, uint8_t r, uint8_t g, uint8_t b, uint8_t flags=0) {
     std::lock_guard<std::mutex> lock(g_state_mutex);
+    if (flags & TERM_FLAG_OVERWRITE) {
+        // Replace last overwrite line if exists, otherwise append
+        for (int i = (int)g_lines.size() - 1; i >= 0; --i) {
+            if (g_lines[i].flags & TERM_FLAG_OVERWRITE) {
+                g_lines[i] = {std::string(text), r, g, b, flags};
+                return;
+            }
+        }
+    }
     g_lines.push_back({std::string(text), r, g, b, flags});
-    if ((int)g_lines.size() > MAX_TERM_LINES)
+    if ((int)g_lines.size() > g_term_buf_size)
         g_lines.erase(g_lines.begin());
 }
 
@@ -95,16 +104,16 @@ void network_thread_func(const std::string& host, const std::string& port) {
 
             case MsgType::S_AUTH_OK: {
                 if (body.size() < sizeof(PktAuthOk) - sizeof(PacketHeader)) break;
-                auto* ok = reinterpret_cast<PktAuthOk*>(body.data() - sizeof(PacketHeader));
-                // manually parse — body starts after header
+                // body layout: player_id(4), sector_x(4), sector_y(4), sector_z(4), nickname(...)
                 uint32_t pid = ntohl(*reinterpret_cast<uint32_t*>(body.data()));
                 char nick[NICKNAME_MAX_LEN+1] = {};
-                std::memcpy(nick, body.data() + sizeof(uint32_t)*3, NICKNAME_MAX_LEN);
+                std::memcpy(nick, body.data() + sizeof(uint32_t)*4, NICKNAME_MAX_LEN);
                 {
                     std::lock_guard<std::mutex> lock(g_state_mutex);
                     g_player_id   = pid;
                     g_player_nick = nick;
                     g_authed      = true;
+                    g_lines.clear();  // clear terminal on (re)login
                 }
                 g_screen = Screen::TERMINAL;
                 sound_play(SoundEvent::AUTH_OK);
@@ -116,7 +125,6 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 push_line(welcome, 150, 220, 150);
                 push_line("  Type 'help' to see available commands.", 100, 150, 100);
                 push_line("", 40, 40, 40);
-                (void)ok;
                 break;
             }
 
@@ -180,6 +188,11 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 char text[481] = {};
                 std::memcpy(text, body.data()+4, std::min(body.size()-4, (size_t)480));
                 push_line(text, r, g, b2, fl);
+                // OVERWRITE flag = warp in progress; plain text = warp ended
+                if (fl & TERM_FLAG_OVERWRITE)
+                    g_warping = true;
+                else if (g_warping)
+                    g_warping = false;
                 break;
             }
 

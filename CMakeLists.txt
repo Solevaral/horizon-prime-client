@@ -17,6 +17,7 @@ set(HP_CLIENT_SOURCES
     src/sound.cpp
     src/settings.cpp
     src/stat_overlay.cpp
+    src/scrollback_overlay.cpp
 )
 
 if(WIN32)

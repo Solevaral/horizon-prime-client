@@ -7,6 +7,7 @@
 #include "sound.h"
 #include "settings.h"
 #include "stat_overlay.h"
+#include "scrollback_overlay.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -27,13 +28,14 @@
 static const float PI = 3.14159265f;
 
 // ─── Font atlas ───────────────────────────────────────────────────────────────
-static stbtt_bakedchar  g_cdata[224];  // ASCII 32..255
+static stbtt_packedchar g_cdata_ascii[224];    // ASCII 32..255
+static stbtt_packedchar g_cdata_cyrillic[256]; // U+0400..U+04FF
 static GLuint           g_font_tex = 0;
 static float            g_font_size   = 17.0f;
-static float            g_cell_w      = 0.0f;  // monospace cell width
+static float            g_cell_w      = 0.0f;
 static float            g_cell_h      = 0.0f;
 
-static const int ATLAS_W = 512, ATLAS_H = 512;
+static const int ATLAS_W = 1024, ATLAS_H = 1024;
 
 bool terminal_init(const char* font_path) {
     FILE* f = fopen(font_path, "rb");
@@ -46,10 +48,28 @@ bool terminal_init(const char* font_path) {
     fclose(f);
 
     std::vector<uint8_t> bitmap(ATLAS_W * ATLAS_H);
-    int ret = stbtt_BakeFontBitmap(ttf_buf.data(), 0, g_font_size,
-                                   bitmap.data(), ATLAS_W, ATLAS_H,
-                                   32, 224, g_cdata);
-    if (ret <= 0) return false;
+
+    stbtt_pack_context pc;
+    if (!stbtt_PackBegin(&pc, bitmap.data(), ATLAS_W, ATLAS_H, 0, 1, nullptr))
+        return false;
+    stbtt_PackSetOversampling(&pc, 1, 1);
+
+    stbtt_pack_range ranges[2];
+    ranges[0].font_size                = g_font_size;
+    ranges[0].first_unicode_codepoint_in_range = 32;
+    ranges[0].num_chars                = 224;
+    ranges[0].chardata_for_range       = g_cdata_ascii;
+    ranges[0].array_of_unicode_codepoints = nullptr;
+
+    ranges[1].font_size                = g_font_size;
+    ranges[1].first_unicode_codepoint_in_range = 0x0400;
+    ranges[1].num_chars                = 256;
+    ranges[1].chardata_for_range       = g_cdata_cyrillic;
+    ranges[1].array_of_unicode_codepoints = nullptr;
+
+    if (!stbtt_PackFontRanges(&pc, ttf_buf.data(), 0, ranges, 2))
+        return false;
+    stbtt_PackEnd(&pc);
 
     glGenTextures(1, &g_font_tex);
     glBindTexture(GL_TEXTURE_2D, g_font_tex);
@@ -62,7 +82,7 @@ bool terminal_init(const char* font_path) {
     // Measure cell size from 'M'
     stbtt_aligned_quad q;
     float cx = 0, cy = 0;
-    stbtt_GetBakedQuad(g_cdata, ATLAS_W, ATLAS_H, 'M'-32, &cx, &cy, &q, 1);
+    stbtt_GetPackedQuad(g_cdata_ascii, ATLAS_W, ATLAS_H, 'M'-32, &cx, &cy, &q, 1);
     g_cell_w = cx;
     g_cell_h = g_font_size * 1.35f;
     return true;
@@ -114,13 +134,26 @@ static float draw_string(float x, float y, const char* text,
             cp = (*s++ & 0x0F) << 12;
             if (*s) cp |= (*s++ & 0x3F) << 6;
             if (*s) cp |= (*s++ & 0x3F);
+        } else if ((*s & 0xF8) == 0xF0) {
+            cp = (*s++ & 0x07) << 18;
+            if (*s) cp |= (*s++ & 0x3F) << 12;
+            if (*s) cp |= (*s++ & 0x3F) << 6;
+            if (*s) cp |= (*s++ & 0x3F);
         } else {
             cp = *s++; // fallback
         }
-        if (cp < 32 || cp > 255) { cx += g_cell_w; continue; }
+        stbtt_packedchar* cdata = nullptr;
+        int idx = -1;
+        if (cp >= 32 && cp < 256) {
+            cdata = g_cdata_ascii; idx = cp - 32;
+        } else if (cp >= 0x0400 && cp < 0x0500) {
+            cdata = g_cdata_cyrillic; idx = cp - 0x0400;
+        } else {
+            cx += g_cell_w; continue;
+        }
         stbtt_aligned_quad q;
         float bx = cx, by = baseline_y;
-        stbtt_GetBakedQuad(g_cdata, ATLAS_W, ATLAS_H, (int)cp-32, &bx, &by, &q, 1);
+        stbtt_GetPackedQuad(cdata, ATLAS_W, ATLAS_H, idx, &bx, &by, &q, 1);
         glTexCoord2f(q.s0,q.t0); glVertex2f(q.x0,q.y0);
         glTexCoord2f(q.s1,q.t0); glVertex2f(q.x1,q.y0);
         glTexCoord2f(q.s1,q.t1); glVertex2f(q.x1,q.y1);
@@ -140,10 +173,19 @@ static float string_width(const char* text) {
         if (*s < 0x80) { cp = *s++; }
         else if ((*s & 0xE0) == 0xC0) { cp = (*s++ & 0x1F) << 6; if (*s) cp |= (*s++ & 0x3F); }
         else if ((*s & 0xF0) == 0xE0) { cp = (*s++ & 0x0F) << 12; if (*s) cp |= (*s++ & 0x3F) << 6; if (*s) cp |= (*s++ & 0x3F); }
+        else if ((*s & 0xF8) == 0xF0) { cp = (*s++ & 0x07) << 18; if (*s) cp |= (*s++ & 0x3F) << 12; if (*s) cp |= (*s++ & 0x3F) << 6; if (*s) cp |= (*s++ & 0x3F); }
         else { cp = *s++; }
-        if (cp < 32 || cp > 255) { cx += g_cell_w; continue; }
+        stbtt_packedchar* cdata = nullptr;
+        int idx = -1;
+        if (cp >= 32 && cp < 256) {
+            cdata = g_cdata_ascii; idx = cp - 32;
+        } else if (cp >= 0x0400 && cp < 0x0500) {
+            cdata = g_cdata_cyrillic; idx = cp - 0x0400;
+        } else {
+            cx += g_cell_w; continue;
+        }
         stbtt_aligned_quad q;
-        stbtt_GetBakedQuad(g_cdata, ATLAS_W, ATLAS_H, (int)cp-32, &cx, &dummy, &q, 1);
+        stbtt_GetPackedQuad(cdata, ATLAS_W, ATLAS_H, idx, &cx, &dummy, &q, 1);
     }
     return cx;
 }
@@ -540,6 +582,13 @@ void terminal_render(int W, int H, float dt) {
         glDisable(GL_DEPTH_TEST);
         stat_render(W, H);
     }
+
+    // Scrollback overlay
+    if (g_screen != Screen::LOGIN && g_scr_open) {
+        set_ortho(W, H);
+        glDisable(GL_DEPTH_TEST);
+        scr_render(W, H);
+    }
 }
 
 // ─── Input callbacks ──────────────────────────────────────────────────────────
@@ -608,6 +657,12 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
     // Stats overlay has priority over settings
     if (g_stat_open) {
         stat_on_key(key, action);
+        return;
+    }
+
+    // Scrollback overlay has priority over settings
+    if (g_scr_open) {
+        scr_on_key(key, action);
         return;
     }
 
@@ -704,6 +759,11 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
         return;
     }
     if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
+        if (g_warping) {
+            std::lock_guard<std::mutex> lk(g_state_mutex);
+            g_lines.push_back({"  [warp] Navigation locked during jump sequence.", 180, 120, 60});
+            return;
+        }
         if (!g_input_buf.empty()) {
             // Check for local-only commands first
             {
@@ -724,7 +784,24 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
                     { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
                     { std::lock_guard<std::mutex> lock(g_state_mutex);
                       g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > MAX_TERM_LINES) g_lines.erase(g_lines.begin()); }
+                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
+                    g_input_buf.clear();
+                    g_scroll_offset = 0;
+                    return;
+                }
+                if (lc == "scr") {
+                    g_scr_open = true;
+                    sound_play(SoundEvent::CMD_CLEAR);
+                    // Save to history
+                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
+                        g_cmd_history.push_back(g_input_buf);
+                    g_history_idx = -1; g_history_saved.clear();
+                    // Echo to terminal
+                    std::string echo;
+                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
+                    { std::lock_guard<std::mutex> lock(g_state_mutex);
+                      g_lines.push_back({echo, 120, 160, 120});
+                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
                     g_input_buf.clear();
                     g_scroll_offset = 0;
                     return;
@@ -741,7 +818,7 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
                     { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
                     { std::lock_guard<std::mutex> lock(g_state_mutex);
                       g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > MAX_TERM_LINES) g_lines.erase(g_lines.begin()); }
+                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
                     g_input_buf.clear();
                     g_scroll_offset = 0;
                     net_send_input("stat");  // Send to server
@@ -774,7 +851,7 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             {
                 std::lock_guard<std::mutex> lock(g_state_mutex);
                 g_lines.push_back({echo, 120, 160, 120});
-                if ((int)g_lines.size() > MAX_TERM_LINES)
+                if ((int)g_lines.size() > g_term_buf_size)
                     g_lines.erase(g_lines.begin());
             }
             // Save to history (skip empty and exact duplicate of last entry)

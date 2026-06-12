@@ -12,6 +12,8 @@ std::vector<TermLine>   g_lines;
 std::vector<ChatLine>   g_chat_lines;
 std::string             g_prompt      = "> ";
 SceneState              g_scene;
+int                     g_term_buf_size = DEFAULT_TERM_LINES;
+bool                    g_scr_open      = false;
 
 std::string             g_input_buf;
 bool                    g_input_active = true;
@@ -25,3 +27,4 @@ std::atomic<Screen>     g_screen {Screen::LOGIN};
 std::atomic<bool>       g_logout_requested {false};
 std::atomic<ConnStatus> g_conn_status {ConnStatus::CONNECTING};
 std::atomic<int>        g_online_count {0};
+std::atomic<bool>       g_warping      {false};

@@ -8,10 +8,14 @@
 #include "protocol/packets.h"
 using namespace hp;
 
+// ─── Terminal line flags ──────────────────────────────────────────────────────
+constexpr uint8_t TERM_FLAG_DIM       = 0x02;  // render at reduced alpha
+constexpr uint8_t TERM_FLAG_OVERWRITE = 0x04;  // replace last line with same flag
+
 // ─── Terminal line ────────────────────────────────────────────────────────────
 struct TermLine {
     std::string text;
-    uint8_t     r = 180, g = 220, b = 180;  // default: pale green
+    uint8_t     r = 180, g = 220, b = 180;
     uint8_t     flags = 0;
 };
 
@@ -31,7 +35,9 @@ struct SceneState {
 };
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
-constexpr int MAX_TERM_LINES = 512;
+constexpr int MIN_TERM_LINES = 30;
+constexpr int MAX_TERM_LINES = 500;
+constexpr int DEFAULT_TERM_LINES = 128;
 
 extern std::atomic<bool>       g_running;
 extern std::atomic<bool>       g_connected;
@@ -46,6 +52,8 @@ extern bool                    g_authed;
 extern std::vector<TermLine>   g_lines;       // scrollback buffer
 extern std::string             g_prompt;      // current prompt string
 extern SceneState              g_scene;
+extern int                     g_term_buf_size;  // user-configurable buffer size (30-500)
+extern bool                    g_scr_open;       // scrollback viewing mode active
 
 // Chat overlay buffer (separate from terminal output)
 constexpr int MAX_CHAT_LINES = 64;
@@ -71,6 +79,7 @@ extern std::atomic<bool>       g_logout_requested;
 enum class ConnStatus { CONNECTING, ONLINE, OFFLINE };
 extern std::atomic<ConnStatus> g_conn_status;
 extern std::atomic<int>        g_online_count;  // players online (from S_WORLD_STATE)
+extern std::atomic<bool>       g_warping;       // true while warp jump sequence is active
 
 // Forward declare for stat_overlay functions
 void stat_open();
