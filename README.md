@@ -2,7 +2,7 @@
 
 A modern terminal-based game client featuring real-time rendering with OpenGL and custom protocol support.
 
-**[Read in Russian / Читать по-русски](README.ru.md)**
+**[Read in Russian / Читать на русском](README.ru.md)**
 
 ## Overview
 
@@ -24,19 +24,19 @@ Horizon Prime is a sophisticated terminal client that connects to a remote serve
 - OpenGL 3.3+
 - CMake 3.15+
 
-\\\ash
+```bash
 git clone https://github.com/yourusername/horizon-prime-client.git
 cd horizon-prime-client
 mkdir build && cd build
 cmake ..
 make
-\\\
+```
 
 ## Running
 
-\\\ash
+```bash
 ./horizon-prime-client --server localhost:9000
-\\\
+```
 
 ## Architecture
 
