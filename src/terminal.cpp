@@ -635,6 +635,12 @@ void terminal_cb_char(GLFWwindow*, unsigned int cp) {
     if (g_screen == Screen::LOGIN) {
         // Accept printable ASCII only for login fields
         if (cp >= 32 && cp < 127) {
+            // Nickname: restrict to the server's allowed set (letters/digits/_-.)
+            if (g_focused_login == 0) {
+                bool ok = (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
+                          (cp >= '0' && cp <= '9') || cp == '_' || cp == '-' || cp == '.';
+                if (!ok) return;
+            }
             if (g_focused_login == 0 && (int)g_field_nick.size() < NICKNAME_MAX_LEN-1)
                 g_field_nick += (char)cp;
             else if (g_focused_login == 1 && (int)g_field_pass.size() < PASSWORD_MAX_LEN-1)
@@ -675,10 +681,16 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             if (clip) {
                 std::string& field = (g_focused_login == 0) ? g_field_nick : g_field_pass;
                 int max_len = (g_focused_login == 0) ? NICKNAME_MAX_LEN - 1 : PASSWORD_MAX_LEN - 1;
+                bool nick_field = (g_focused_login == 0);
                 for (const char* p = clip; *p && (int)field.size() < max_len; ++p) {
-                    // only printable ASCII for login fields
-                    if ((unsigned char)*p >= 32 && (unsigned char)*p < 127)
-                        field += *p;
+                    unsigned char c = (unsigned char)*p;
+                    if (c < 32 || c >= 127) continue;  // printable ASCII only
+                    if (nick_field) {
+                        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+                        if (!ok) continue;
+                    }
+                    field += (char)c;
                 }
             }
             return;
@@ -702,6 +714,15 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             && !g_field_nick.empty() && !g_field_pass.empty()) {
             if (g_conn_status != ConnStatus::ONLINE) {
                 g_auth_error = "Server is offline. Connecting...";
+                return;
+            }
+            // Quick local checks for registration (server re-validates anyway).
+            if (g_field_nick.size() < 4) {
+                g_auth_error = "Nickname must be at least 4 characters.";
+                return;
+            }
+            if (g_field_pass.size() < 5) {
+                g_auth_error = "Password must be at least 5 characters.";
                 return;
             }
             g_auth_error.clear();
