@@ -963,6 +963,10 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
         struct CmdEntry { const char* cmd; int min_access; };
         static const CmdEntry ALL_CMDS[] = {
             { "help",       3 },
+            { "welcome",    3 },
+            { "logo",       3 },
+            { "ru",         3 },
+            { "eng",        3 },
             { "who",        3 },
             { "scan",       3 },
             { "stat",       3 },

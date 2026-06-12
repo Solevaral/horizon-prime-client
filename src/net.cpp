@@ -3,6 +3,7 @@
 #include "sound.h"
 #include "stat_overlay.h"
 #include "report_overlay.h"
+#include "settings.h"
 
 #include <cstring>
 #include <algorithm>
@@ -143,6 +144,10 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 push_line(welcome, 150, 220, 150);
                 push_line("  Type 'help' to see available commands.", 100, 150, 100);
                 push_line("", 40, 40, 40);
+                // Optionally request the daily logo. Language is chosen on the
+                // server (bilingual prompt for new players) or via Settings.
+                if (g_settings.welcome_logo)
+                    net_send_input("logo");
                 break;
             }
 

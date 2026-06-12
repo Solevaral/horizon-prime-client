@@ -8,6 +8,8 @@ struct ClientSettings {
     bool scanlines         = true;
     int  scanline_bright   = 3;      // 1..10
     int  term_buffer_size  = 128;    // 30..500 lines
+    int  language          = 1;      // 0 = ENG, 1 = RU (RU community by default)
+    bool welcome_logo      = true;   // show the daily logo on every login
 };
 
 extern ClientSettings g_settings;

@@ -1,5 +1,7 @@
 #include "settings.h"
 #include "sound.h"
+#include "net.h"
+#include "state.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -28,6 +30,8 @@ void settings_load(const std::string& path) {
         else if (key == "scanlines")    g_settings.scanlines       = (val != 0);
         else if (key == "scanline_bright") g_settings.scanline_bright = std::clamp(val, 1, 10);
         else if (key == "term_buffer_size") g_settings.term_buffer_size = std::clamp(val, 30, 500);
+        else if (key == "language")         g_settings.language        = std::clamp(val, 0, 1);
+        else if (key == "welcome_logo")     g_settings.welcome_logo    = (val != 0);
     }
 }
 
@@ -39,6 +43,8 @@ void settings_save(const std::string& path) {
     f << "scanlines "        << (g_settings.scanlines ? 1 : 0)       << "\n";
     f << "scanline_bright "  << g_settings.scanline_bright            << "\n";
     f << "term_buffer_size " << g_settings.term_buffer_size          << "\n";
+    f << "language "         << g_settings.language                   << "\n";
+    f << "welcome_logo "     << (g_settings.welcome_logo ? 1 : 0)     << "\n";
 }
 
 // ─── Overlay state ────────────────────────────────────────────────────────────
@@ -50,33 +56,40 @@ struct SettingRow {
     int min_val, max_val;
 };
 
+// Language is a TOGGLE between two named choices (ENG / RU).
 static const SettingRow ROWS[] = {
+    { "Language",            SettingRow::TOGGLE, 0, 1    },
+    { "Welcome Logo",        SettingRow::TOGGLE, 0, 1    },
     { "Sounds (Beta)",       SettingRow::TOGGLE, 0, 1    },
     { "Sound Volume",        SettingRow::RANGE,  1, 10   },
     { "Scanlines",           SettingRow::TOGGLE, 0, 1    },
     { "Scanline Bright",     SettingRow::RANGE,  1, 10   },
     { "Terminal Buffer Size", SettingRow::RANGE,  30, 500 },
 };
-static constexpr int ROW_COUNT = 5;
+static constexpr int ROW_COUNT = 7;
 
 static int get_value(int idx) {
     switch (idx) {
-    case 0: return g_settings.sounds_enabled  ? 1 : 0;
-    case 1: return g_settings.sound_volume;
-    case 2: return g_settings.scanlines       ? 1 : 0;
-    case 3: return g_settings.scanline_bright;
-    case 4: return g_settings.term_buffer_size;
+    case 0: return g_settings.language;            // 0=ENG, 1=RU
+    case 1: return g_settings.welcome_logo ? 1 : 0;
+    case 2: return g_settings.sounds_enabled  ? 1 : 0;
+    case 3: return g_settings.sound_volume;
+    case 4: return g_settings.scanlines       ? 1 : 0;
+    case 5: return g_settings.scanline_bright;
+    case 6: return g_settings.term_buffer_size;
     default: return 0;
     }
 }
 
 static void set_value(int idx, int v) {
     switch (idx) {
-    case 0: g_settings.sounds_enabled   = (v != 0); break;
-    case 1: g_settings.sound_volume     = std::clamp(v, 1, 10); break;
-    case 2: g_settings.scanlines        = (v != 0); break;
-    case 3: g_settings.scanline_bright  = std::clamp(v, 1, 10); break;
-    case 4: g_settings.term_buffer_size = std::clamp(v, 30, 500); break;
+    case 0: g_settings.language          = std::clamp(v, 0, 1); break;
+    case 1: g_settings.welcome_logo      = (v != 0); break;
+    case 2: g_settings.sounds_enabled    = (v != 0); break;
+    case 3: g_settings.sound_volume      = std::clamp(v, 1, 10); break;
+    case 4: g_settings.scanlines         = (v != 0); break;
+    case 5: g_settings.scanline_bright   = std::clamp(v, 1, 10); break;
+    case 6: g_settings.term_buffer_size  = std::clamp(v, 30, 500); break;
     }
 }
 
@@ -88,6 +101,9 @@ static void change_value(int idx, int delta) {
     else
         v = std::clamp(v + delta, row.min_val, row.max_val);
     set_value(idx, v);
+    // Language change takes effect on the server immediately.
+    if (idx == 0 && g_screen != Screen::LOGIN)
+        net_send_input(g_settings.language ? "RU" : "ENG");
     if (g_settings.sounds_enabled)
         sound_play(SoundEvent::KEY_TYPE);
 }
@@ -221,7 +237,9 @@ void settings_render(int W, int H) {
         const auto& row = ROWS[i];
         int v = get_value(i);
         char val_str[32];
-        if (row.type == SettingRow::TOGGLE) {
+        if (i == 0) {  // Language row: show named choices
+            std::snprintf(val_str, sizeof(val_str), "%s", v ? "RU" : "ENG");
+        } else if (row.type == SettingRow::TOGGLE) {
             std::snprintf(val_str, sizeof(val_str), "%s", v ? "On" : "Off");
         } else {
             std::snprintf(val_str, sizeof(val_str), "%d", v);
@@ -248,7 +266,9 @@ void settings_render(int W, int H) {
         float vw = term_string_width(val_str);
         float vcx = vx + ARR_W + (VAL_AREA_W - 2*ARR_W - vw) * 0.5f;
         float vc = focused ? 1.0f : 0.7f;
-        if (row.type == SettingRow::TOGGLE) {
+        if (i == 0) {  // Language: neutral coloring
+            term_draw_string(vcx, vy, val_str, 0.85f*vc, 0.92f*vc, 1.0f*vc, 1.0f);
+        } else if (row.type == SettingRow::TOGGLE) {
             float vr = v ? 0.30f*vc : 0.70f*vc;
             float vg = v ? 0.90f*vc : 0.35f*vc;
             float vb = v ? 0.40f*vc : 0.35f*vc;
@@ -269,12 +289,18 @@ void settings_render(int W, int H) {
 
     // Description of focused setting
     const char* desc = nullptr;
+    bool ru = (g_settings.language == 1);
     switch (s_selected) {
-    case 0: desc = "  Включить/выключить звуки (экспериментально)"; break;
-    case 1: desc = "  Громкость звука (1-10)"; break;
-    case 2: desc = "  Включить/выключить растровые линии на экране"; break;
-    case 3: desc = "  Яркость растровых линий (1-10)"; break;
-    case 4: desc = "  Объём буфера терминала: 30-500 строк  |  Больше = больше памяти"; break;
+    case 0: desc = ru ? "  Язык игры: ENG / RU" : "  Game language: ENG / RU"; break;
+    case 1: desc = ru ? "  Показывать лого дня при каждом входе"
+                      : "  Show the daily logo on every login"; break;
+    case 2: desc = ru ? "  Включить/выключить звуки (экспериментально)"
+                      : "  Enable/disable sounds (experimental)"; break;
+    case 3: desc = ru ? "  Громкость звука (1-10)" : "  Sound volume (1-10)"; break;
+    case 4: desc = ru ? "  Включить/выключить растровые линии на экране"
+                      : "  Enable/disable scanlines"; break;
+    case 5: desc = ru ? "  Яркость растровых линий (1-10)" : "  Scanline brightness (1-10)"; break;
+    case 6: desc = ru ? "  Объём буфера терминала: 30-500 строк" : "  Terminal buffer: 30-500 lines"; break;
     }
     if (desc) {
         float dh = ch + 6.0f;
