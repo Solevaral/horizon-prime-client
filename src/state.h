@@ -33,6 +33,35 @@ struct MapPlayer {
     uint32_t    id = 0;
 };
 
+// ─── Ship / activity state (HUD widgets) ──────────────────────────────────────
+// Pure-presentation source for the on-screen ship model and the mining/farming
+// progress feedback. Today these are client-side stubs with sensible defaults;
+// the moment the server starts sending the real numbers we just point these at
+// the network thread instead and the widgets keep working unchanged. (Geometry,
+// rotation, lights and sparks stay client-side — they are display, not state.)
+enum class ShipActivity : uint8_t {
+    IDLE = 0,   // docked / drifting
+    MINING,     // drilling an asteroid
+    FARMING,    // tending crops
+    WARPING,    // jump sequence
+};
+
+struct ShipState {
+    uint8_t      type      = 0;       // ship class/skin id (selects voxel model)
+    float        hull      = 1.0f;    // 0..1 hull integrity
+    float        fuel      = 1.0f;    // 0..1 fuel
+    ShipActivity activity  = ShipActivity::IDLE;
+    float        progress  = 0.0f;    // 0..1 progress of current activity
+    char         target[48] = {};     // e.g. "asteroid 1" — what we're acting on
+};
+
+// Guarded by g_state_mutex.
+extern ShipState g_ship;
+
+// HUD widgets: when true, the map + ship are docked in the corners on top of the
+// terminal instead of (or in addition to) the full-screen map overlay.
+extern bool g_hud_widgets;
+
 // ─── Scene state ──────────────────────────────────────────────────────────────
 struct SceneState {
     bool    active       = false;

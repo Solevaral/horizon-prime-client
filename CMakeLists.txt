@@ -20,6 +20,7 @@ set(HP_CLIENT_SOURCES
     src/scrollback_overlay.cpp
     src/report_overlay.cpp
     src/map_overlay.cpp
+    src/ship_widget.cpp
     src/obfuscate.cpp
 )
 

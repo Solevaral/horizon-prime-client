@@ -12,6 +12,9 @@ bool                    g_authed        = false;
 int32_t                 g_self_sx = 0, g_self_sy = 0, g_self_sz = 0;
 std::vector<MapPlayer>  g_map_players;
 
+ShipState               g_ship;
+bool                    g_hud_widgets = true;   // docked HUD on by default
+
 std::vector<TermLine>   g_lines;
 std::vector<ChatLine>   g_chat_lines;
 std::string             g_prompt      = "> ";

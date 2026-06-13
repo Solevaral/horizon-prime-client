@@ -10,6 +10,7 @@
 #include "scrollback_overlay.h"
 #include "report_overlay.h"
 #include "map_overlay.h"
+#include "ship_widget.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -217,6 +218,47 @@ static std::string truncate_string(const char* text, float max_width) {
         }
     }
     return result;
+}
+
+// ─── HUD widget layout ────────────────────────────────────────────────────────
+// The docked ship (top-right) and mini-map (bottom-right) live in a fixed-width
+// column on the right edge. The terminal text area is shrunk to leave room.
+// Disabled automatically on narrow windows so the console never gets squeezed.
+struct HudLayout {
+    bool  enabled;
+    float col_x;      // left edge of the widget column
+    float col_w;      // widget width
+    float ship_y, ship_h;
+    float map_y,  map_h;
+};
+
+static HudLayout hud_layout(int W, int H) {
+    HudLayout L{};
+    const float COL_W = 232.0f;
+    const float MARGIN = 8.0f;
+    // Need enough width left over for a usable console, else turn the HUD off.
+    L.enabled = g_hud_widgets && (W >= 760) && (H >= 420);
+    if (!L.enabled) return L;
+
+    L.col_w = COL_W;
+    L.col_x = (float)W - COL_W - MARGIN;
+
+    float top = MARGIN;
+    float bottom = (float)H - MARGIN;
+    float gap = MARGIN;
+    // Ship gets a square-ish box on top; map fills the rest below it.
+    L.ship_y = top;
+    L.ship_h = COL_W * 0.92f;
+    L.map_y  = L.ship_y + L.ship_h + gap;
+    L.map_h  = bottom - L.map_y;
+    // If the window is short, give them an even split instead.
+    if (L.map_h < 140.0f) {
+        float total = bottom - top - gap;
+        L.ship_h = total * 0.5f;
+        L.map_y  = top + L.ship_h + gap;
+        L.map_h  = total * 0.5f;
+    }
+    return L;
 }
 
 // ─── Public font helpers (used by settings overlay) ───────────────────────────
@@ -533,7 +575,9 @@ static void render_terminal(int W, int H, float dt) {
 
     // Layout
     const float PAD_L   = 12.0f;
-    const float PAD_R   = 12.0f;
+    HudLayout   hud     = hud_layout(W, H);
+    // Reserve the right column for HUD widgets so text never runs underneath.
+    const float PAD_R   = hud.enabled ? ((float)W - hud.col_x + 12.0f) : 12.0f;
     const float INPUT_H = g_cell_h + 14.0f;
     const float PROMPT_Y = (float)H - INPUT_H + 6.0f;
     const float TEXT_AREA_H = (float)H - INPUT_H - 6.0f;
@@ -684,6 +728,20 @@ void terminal_render(int W, int H, float dt) {
         glDisable(GL_DEPTH_TEST);
     } else {
         render_terminal(W, H, dt);
+
+        // Docked HUD widgets (ship + mini-map) on the right column. Drawn on top
+        // of the terminal; the text area was already shrunk to leave room.
+        HudLayout hud = hud_layout(W, H);
+        if (hud.enabled) {
+            set_ortho(W, H);
+            glDisable(GL_DEPTH_TEST);
+            ship_widget_render(hud.col_x, hud.ship_y, hud.col_w, hud.ship_h, dt);
+            // Restore 2D ortho — the ship widget swaps to a 3D camera internally.
+            set_ortho(W, H);
+            glDisable(GL_DEPTH_TEST);
+            map_widget_render(hud.col_x, hud.map_y, hud.col_w, hud.map_h, dt);
+        }
+
         // Chat overlay on top of terminal (not during scenes)
         set_ortho(W, H);
         glDisable(GL_DEPTH_TEST);

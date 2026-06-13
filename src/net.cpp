@@ -18,6 +18,11 @@
   #include <arpa/inet.h>
 #endif
 
+// Used only to wake the GLFW event loop from this network thread (e.g. when a
+// server-driven `exit` flips g_running): glfwPostEmptyEvent is thread-safe.
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 tcp::socket* g_socket = nullptr;
 
 void net_send(const void* data, size_t len) {
@@ -149,7 +154,7 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 g_screen = Screen::TERMINAL;
                 sound_play(SoundEvent::AUTH_OK);
                 push_line("", 40, 40, 40);
-                push_line("  HORIZON PRIME  //  Terminal v1.0", 80, 160, 255);
+                push_line("  HORIZON PRIME  //  Terminal v1.1", 80, 160, 255);
                 push_line("", 40, 40, 40);
                 char welcome[128];
                 std::snprintf(welcome, sizeof(welcome), "  Welcome, %s.", nick);
@@ -281,6 +286,10 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 bool is_exit = (!body.empty() && body[0] == 1);
                 if (is_exit) {
                     g_running = false;
+                    // Wake the GLFW loop so it re-checks g_running immediately;
+                    // otherwise the window stays open until the next input event
+                    // (it blocks in vsync'd glfwSwapBuffers between frames).
+                    glfwPostEmptyEvent();
                 } else {
                     g_logout_requested = true;
                     {

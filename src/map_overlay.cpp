@@ -112,19 +112,113 @@ static void draw_rect_outline(float x, float y, float w, float h,
 // Project a sector offset (relative to the player, in sector units) to screen.
 // We rotate around the vertical (yaw), tilt (pitch), then drop to 2D — a
 // hand-rolled orthographic camera, so a 3D grid reads as 3D on a flat surface.
+// `yaw`/`pitch` are explicit so the docked widget can spin on its own clock
+// independently of the full-screen overlay.
 struct Proj { float x, y, depth; };
 
-static Proj project(float dx, float dy, float dz, float cx, float cy, float scale) {
-    // Yaw around Y (here our "vertical" map axis is Z): rotate X/Y plane.
-    float cy_ = std::cos(s_yaw),  sy_ = std::sin(s_yaw);
+static Proj project_at(float dx, float dy, float dz, float cx, float cy,
+                       float scale, float yaw, float pitch) {
+    float cy_ = std::cos(yaw),  sy_ = std::sin(yaw);
     float rx = dx * cy_ - dy * sy_;
     float ry = dx * sy_ + dy * cy_;
-    // Pitch: tilt the Z axis toward the viewer.
-    float cp = std::cos(s_pitch), sp = std::sin(s_pitch);
+    float cp = std::cos(pitch), sp = std::sin(pitch);
     float screen_x = rx;
     float screen_y = ry * cp - dz * sp;
     float depth    = ry * sp + dz * cp;   // larger = closer to viewer
     return { cx + screen_x * scale, cy + screen_y * scale, depth };
+}
+
+static Proj project(float dx, float dy, float dz, float cx, float cy, float scale) {
+    return project_at(dx, dy, dz, cx, cy, scale, s_yaw, s_pitch);
+}
+
+// ─── Shared scene drawer ──────────────────────────────────────────────────────
+// Draws the star field, grid floor and player dots into a region centred at
+// (cx,cy) with the given scale/range/orientation. Used by both the full-screen
+// overlay and the docked corner widget. `radius` controls how many sectors out
+// we draw; `show_labels` toggles nick text (off in the tiny widget).
+static void map_draw_scene(int self_sx, int self_sy, int self_sz,
+                           const std::vector<MapPlayer>& players,
+                           float cx, float cy, float scale, int radius,
+                           float yaw, float pitch, float ch, bool show_labels) {
+    struct Dot {
+        float x, y, depth, size;
+        float r, g, b;
+        bool  is_player, is_self;
+        std::string label;
+    };
+    std::vector<Dot> dots;
+
+    for (int dz = -radius; dz <= radius; ++dz)
+    for (int dy = -radius; dy <= radius; ++dy)
+    for (int dx = -radius; dx <= radius; ++dx) {
+        int32_t sx = self_sx + dx, sy = self_sy + dy, sz = self_sz + dz;
+        if (!sector_has_star(sx, sy, sz)) continue;
+        auto si = get_star_info(sx, sy, sz);
+        Proj p = project_at((float)dx, (float)dy, (float)dz, cx, cy, scale, yaw, pitch);
+        Dot d;
+        d.x = p.x; d.y = p.y; d.depth = p.depth;
+        d.size = 2.0f + (p.depth + radius) / (2.0f * radius) * 4.0f;
+        d.r = si.r; d.g = si.g; d.b = si.b;
+        d.is_player = d.is_self = false;
+        dots.push_back(std::move(d));
+    }
+
+    for (auto& mp : players) {
+        int dx = mp.sx - self_sx, dy = mp.sy - self_sy, dz = mp.sz - self_sz;
+        Proj p = project_at((float)dx, (float)dy, (float)dz, cx, cy, scale, yaw, pitch);
+        Dot d;
+        d.x = p.x; d.y = p.y; d.depth = p.depth;
+        d.is_self   = (mp.id == g_player_id);
+        d.is_player = true;
+        d.size = d.is_self ? 9.0f : 7.0f;
+        if (d.is_self) { d.r = 0.30f; d.g = 1.00f; d.b = 0.45f; }
+        else           { d.r = 1.00f; d.g = 0.75f; d.b = 0.20f; }
+        d.label = mp.nick;
+        dots.push_back(std::move(d));
+    }
+
+    std::sort(dots.begin(), dots.end(),
+              [](const Dot& a, const Dot& b){ return a.depth < b.depth; });
+
+    // Grid floor at the player's Z plane.
+    glLineWidth(1.0f);
+    glColor4f(0.12f, 0.18f, 0.40f, 0.45f);
+    glBegin(GL_LINES);
+    for (int g = -radius; g <= radius; ++g) {
+        Proj a = project_at((float)-radius, (float)g, 0.0f, cx, cy, scale, yaw, pitch);
+        Proj b = project_at((float) radius, (float)g, 0.0f, cx, cy, scale, yaw, pitch);
+        glVertex2f(a.x, a.y); glVertex2f(b.x, b.y);
+        Proj c = project_at((float)g, (float)-radius, 0.0f, cx, cy, scale, yaw, pitch);
+        Proj d = project_at((float)g, (float) radius, 0.0f, cx, cy, scale, yaw, pitch);
+        glVertex2f(c.x, c.y); glVertex2f(d.x, d.y);
+    }
+    glEnd();
+
+    glEnable(GL_POINT_SMOOTH);
+    for (auto& d : dots) {
+        float t = (d.depth + radius) / (2.0f * radius);
+        t = std::clamp(t, 0.25f, 1.0f);
+        float br = d.is_player ? 1.0f : t;
+
+        if (d.is_self) {
+            float pulse = 0.5f + 0.5f * std::sin((float)glfwGetTime() * 3.0f);
+            glPointSize(d.size + 8.0f + pulse * 4.0f);
+            glColor4f(d.r, d.g, d.b, 0.20f);
+            glBegin(GL_POINTS); glVertex2f(d.x, d.y); glEnd();
+        }
+
+        glPointSize(d.size);
+        glColor4f(d.r * br, d.g * br, d.b * br, d.is_player ? 1.0f : 0.85f);
+        glBegin(GL_POINTS); glVertex2f(d.x, d.y); glEnd();
+
+        if (show_labels && d.is_player && !d.label.empty()) {
+            float lw = term_string_width(d.label.c_str());
+            term_draw_string(d.x - lw * 0.5f, d.y - ch - 4.0f, d.label.c_str(),
+                             d.r, d.g, d.b, 0.95f);
+        }
+    }
+    glDisable(GL_POINT_SMOOTH);
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
@@ -158,90 +252,9 @@ void map_render(int W, int H, float dt) {
                   self_sx, self_sy, self_sz);
     term_draw_string(20.0f, 16.0f, hdr, 0.45f, 0.70f, 1.0f, 1.0f);
 
-    // ── Build draw list of stars + players, sorted back-to-front by depth ──────
-    struct Dot {
-        float x, y, depth, size;
-        float r, g, b;
-        bool  is_player, is_self;
-        std::string label;
-    };
-    std::vector<Dot> dots;
-
-    // Stars in a cube around the player
-    for (int dz = -s_radius; dz <= s_radius; ++dz)
-    for (int dy = -s_radius; dy <= s_radius; ++dy)
-    for (int dx = -s_radius; dx <= s_radius; ++dx) {
-        int32_t sx = self_sx + dx, sy = self_sy + dy, sz = self_sz + dz;
-        if (!sector_has_star(sx, sy, sz)) continue;
-        auto si = get_star_info(sx, sy, sz);
-        Proj p = project((float)dx, (float)dy, (float)dz, cx, cy, scale);
-        Dot d;
-        d.x = p.x; d.y = p.y; d.depth = p.depth;
-        d.size = 2.0f + (p.depth + s_radius) / (2.0f * s_radius) * 4.0f;
-        d.r = si.r; d.g = si.g; d.b = si.b;
-        d.is_player = d.is_self = false;
-        dots.push_back(std::move(d));
-    }
-
-    // Players (drawn larger, with nick labels)
-    for (auto& mp : players) {
-        int dx = mp.sx - self_sx, dy = mp.sy - self_sy, dz = mp.sz - self_sz;
-        Proj p = project((float)dx, (float)dy, (float)dz, cx, cy, scale);
-        Dot d;
-        d.x = p.x; d.y = p.y; d.depth = p.depth;
-        d.is_self   = (mp.id == g_player_id);
-        d.is_player = true;
-        d.size = d.is_self ? 9.0f : 7.0f;
-        if (d.is_self) { d.r = 0.30f; d.g = 1.00f; d.b = 0.45f; }
-        else           { d.r = 1.00f; d.g = 0.75f; d.b = 0.20f; }
-        d.label = mp.nick;
-        dots.push_back(std::move(d));
-    }
-
-    std::sort(dots.begin(), dots.end(),
-              [](const Dot& a, const Dot& b){ return a.depth < b.depth; });
-
-    // ── Grid floor at the player's Z plane (faint, for spatial reference) ──────
-    glLineWidth(1.0f);
-    glColor4f(0.12f, 0.18f, 0.40f, 0.45f);
-    glBegin(GL_LINES);
-    for (int g = -s_radius; g <= s_radius; ++g) {
-        Proj a = project((float)-s_radius, (float)g, 0.0f, cx, cy, scale);
-        Proj b = project((float) s_radius, (float)g, 0.0f, cx, cy, scale);
-        glVertex2f(a.x, a.y); glVertex2f(b.x, b.y);
-        Proj c = project((float)g, (float)-s_radius, 0.0f, cx, cy, scale);
-        Proj d = project((float)g, (float) s_radius, 0.0f, cx, cy, scale);
-        glVertex2f(c.x, c.y); glVertex2f(d.x, d.y);
-    }
-    glEnd();
-
-    // ── Dots ──────────────────────────────────────────────────────────────────
-    glEnable(GL_POINT_SMOOTH);
-    for (auto& d : dots) {
-        // Depth-based brightness: closer = brighter.
-        float t = (d.depth + s_radius) / (2.0f * s_radius);
-        t = std::clamp(t, 0.25f, 1.0f);
-        float br = d.is_player ? 1.0f : t;
-
-        if (d.is_self) {
-            // Pulsing halo ring on the player.
-            float pulse = 0.5f + 0.5f * std::sin((float)glfwGetTime() * 3.0f);
-            glPointSize(d.size + 8.0f + pulse * 4.0f);
-            glColor4f(d.r, d.g, d.b, 0.20f);
-            glBegin(GL_POINTS); glVertex2f(d.x, d.y); glEnd();
-        }
-
-        glPointSize(d.size);
-        glColor4f(d.r * br, d.g * br, d.b * br, d.is_player ? 1.0f : 0.85f);
-        glBegin(GL_POINTS); glVertex2f(d.x, d.y); glEnd();
-
-        if (d.is_player && !d.label.empty()) {
-            float lw = term_string_width(d.label.c_str());
-            term_draw_string(d.x - lw * 0.5f, d.y - ch - 4.0f, d.label.c_str(),
-                             d.r, d.g, d.b, 0.95f);
-        }
-    }
-    glDisable(GL_POINT_SMOOTH);
+    // Stars, grid floor and players — shared with the docked widget.
+    map_draw_scene(self_sx, self_sy, self_sz, players,
+                   cx, cy, scale, s_radius, s_yaw, s_pitch, ch, /*labels*/true);
 
     // ── Footer / hint bar ──────────────────────────────────────────────────────
     const char* hint =
@@ -256,6 +269,61 @@ void map_render(int W, int H, float dt) {
     char oc[48];
     std::snprintf(oc, sizeof(oc), "online: %d", (int)players.size());
     term_draw_string(20.0f, (float)H - ch - 6.0f + 0.0f, oc, 0.50f, 0.65f, 0.85f, 1.0f);
+}
+
+// ─── Docked corner widget ─────────────────────────────────────────────────────
+// A compact, always-on mini-map that slowly auto-rotates on its own clock,
+// drawn into the rect (x,y,w,h). Independent of the full-screen overlay's
+// yaw/pitch/zoom so opening `map` doesn't disturb the corner view.
+void map_widget_render(float x, float y, float w, float h, float dt) {
+    static float s_wyaw = 0.6f;
+    s_wyaw += dt * 0.18f;                 // slow, hypnotic auto-spin
+    const float s_wpitch = 0.62f;
+    const int   s_wradius = 4;
+
+    float ch = term_cell_h();
+
+    // Panel frame.
+    glDisable(GL_TEXTURE_2D);
+    draw_rect(x, y, w, h, 0.02f, 0.03f, 0.06f, 0.82f);
+    glColor4f(0.18f, 0.30f, 0.55f, 0.9f); glLineWidth(1.0f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(x+0.5f, y+0.5f); glVertex2f(x+w-0.5f, y+0.5f);
+        glVertex2f(x+w-0.5f, y+h-0.5f); glVertex2f(x+0.5f, y+h-0.5f);
+    glEnd();
+
+    int32_t self_sx, self_sy, self_sz;
+    std::vector<MapPlayer> players;
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        self_sx = g_self_sx; self_sy = g_self_sy; self_sz = g_self_sz;
+        players = g_map_players;
+    }
+
+    term_draw_string(x + 8, y + 5, "// MAP", 0.40f, 0.65f, 1.0f, 0.95f);
+    char sec[48];
+    std::snprintf(sec, sizeof(sec), "[%d %d %d]", self_sx, self_sy, self_sz);
+    float sw = term_string_width(sec);
+    term_draw_string(x + w - sw - 8, y + 5, sec, 0.40f, 0.55f, 0.80f, 0.9f);
+
+    // Clip the rotating scene to the inner area so dots don't spill over the
+    // frame as they orbit. Scissor takes framebuffer (bottom-left) coords.
+    GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+    int fb_h = vp[3] + vp[1];
+    float ix = x + 2, iy = y + ch + 4;
+    float iw = w - 4, ih = h - (ch + 4) - 4;
+    glEnable(GL_SCISSOR_TEST);
+    glScissor((GLint)ix, (GLint)(fb_h - (iy + ih)), (GLsizei)iw, (GLsizei)ih);
+
+    float cx = x + w * 0.5f;
+    float cy = y + h * 0.5f + ch * 0.4f;
+    float scale = std::min(iw, ih) / (float)(s_wradius * 2 + 2) * 0.85f;
+
+    map_draw_scene(self_sx, self_sy, self_sz, players,
+                   cx, cy, scale, s_wradius, s_wyaw, s_wpitch, ch, /*labels*/false);
+
+    glDisable(GL_SCISSOR_TEST);
+    glColor4f(1, 1, 1, 1);
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────

@@ -9,6 +9,9 @@
 
 #include <thread>
 #include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 #ifdef _WIN32
@@ -55,7 +58,33 @@ int main(int argc, char* argv[]) {
     if (g_settings.remember_login) g_field_nick = g_saved_login.nick;
     if (g_settings.remember_pass)  g_field_pass = g_saved_login.pass;
 
-    std::thread net_thread(network_thread_func, host, port_str);
+    // ── HUD preview mode (temporary) ──────────────────────────────────────────
+    // HP_PREVIEW=1 skips login/server and drops straight onto the terminal screen
+    // with mock data so the docked HUD widgets can be eyeballed without auth.
+    const char* preview_env = std::getenv("HP_PREVIEW");
+    bool preview = preview_env && std::strcmp(preview_env, "0") != 0;
+    if (preview) {
+        g_screen = Screen::TERMINAL;
+        {
+            std::lock_guard<std::mutex> lk(g_state_mutex);
+            g_self_sx = 12; g_self_sy = -4; g_self_sz = 7;
+            g_map_players.push_back({ "Nova",  13, -4,  7, 2 });
+            g_map_players.push_back({ "Drake", 12, -3,  8, 3 });
+            g_map_players.push_back({ "YOU",   12, -4,  7, 1 });
+            g_player_id = 1;
+            g_lines.push_back({ "  Horizon Prime — HUD preview", 120, 180, 255 });
+            g_lines.push_back({ "  > scan", 120, 160, 120 });
+            g_lines.push_back({ "  3 asteroids detected in this sector.", 180, 200, 180 });
+            g_lines.push_back({ "  > mine asteroid 1", 120, 160, 120 });
+            g_ship.activity = ShipActivity::MINING;
+            std::strncpy(g_ship.target, "asteroid 1", sizeof(g_ship.target)-1);
+            g_ship.hull = 0.82f; g_ship.fuel = 0.64f;
+        }
+    }
+
+    void (*net_fn)(const std::string&, const std::string&) =
+        preview ? +[](const std::string&, const std::string&){} : network_thread_func;
+    std::thread net_thread(net_fn, host, port_str);
 
     if (!glfwInit()) { g_running=false; net_thread.join(); return 1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
@@ -93,6 +122,26 @@ int main(int argc, char* argv[]) {
         last_time  = now;
 
         glfwPollEvents();
+
+        // Preview: drive mock ship activity so all widget states are visible.
+        if (preview) {
+            static float t = 0.0f; t += dt;
+            std::lock_guard<std::mutex> lk(g_state_mutex);
+            int phase = ((int)(t / 6.0f)) % 3;   // 6s per phase: mine -> warp -> idle
+            if (phase == 0) {
+                g_ship.activity = ShipActivity::MINING;
+                std::strncpy(g_ship.target, "asteroid 1", sizeof(g_ship.target)-1);
+                g_ship.progress = std::fmod(t / 6.0f, 1.0f);
+            } else if (phase == 1) {
+                g_ship.activity = ShipActivity::WARPING;
+                std::strncpy(g_ship.target, "Vega-7", sizeof(g_ship.target)-1);
+                g_ship.progress = std::fmod(t / 6.0f, 1.0f);
+            } else {
+                g_ship.activity = ShipActivity::IDLE;
+                g_ship.target[0] = '\0';
+            }
+        }
+
         int W, H;
         glfwGetFramebufferSize(win, &W, &H);
         if (H == 0) H = 1;

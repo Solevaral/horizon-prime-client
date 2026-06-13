@@ -9,3 +9,6 @@ extern bool g_map_open;
 void map_render(int W, int H, float dt);
 bool map_on_key(int key, int action);
 void map_on_scroll(double yoffset);
+
+// Docked corner mini-map: auto-rotating, drawn into a rect. Always-on HUD.
+void map_widget_render(float x, float y, float w, float h, float dt);
