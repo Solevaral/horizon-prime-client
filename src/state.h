@@ -26,6 +26,13 @@ struct ChatLine {
     double      timestamp = 0.0;  // glfwGetTime() when received
 };
 
+// ─── Galaxy map data (from S_WORLD_STATE / S_AUTH_OK) ─────────────────────────
+struct MapPlayer {
+    std::string nick;
+    int32_t     sx = 0, sy = 0, sz = 0;
+    uint32_t    id = 0;
+};
+
 // ─── Scene state ──────────────────────────────────────────────────────────────
 struct SceneState {
     bool    active       = false;
@@ -48,6 +55,12 @@ extern uint32_t                g_player_id;
 extern std::string             g_player_nick;
 extern int                     g_player_access;  // 0=admin,1=mod,2=helper,3=user
 extern bool                    g_authed;
+
+// Galaxy map: this player's current sector + all online players' sectors.
+// Updated from S_AUTH_OK (own sector) and S_WORLD_STATE (everyone). Guarded
+// by g_state_mutex.
+extern int32_t                 g_self_sx, g_self_sy, g_self_sz;
+extern std::vector<MapPlayer>  g_map_players;
 
 // Terminal buffer
 extern std::vector<TermLine>   g_lines;       // scrollback buffer

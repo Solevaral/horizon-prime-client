@@ -142,6 +142,7 @@ void network_thread_func(const std::string& host, const std::string& port) {
                     g_player_access = acc;
                     g_player_nick   = nick;
                     g_authed        = true;
+                    g_self_sx = sx; g_self_sy = sy; g_self_sz = sz;
                     g_lines.clear();  // clear terminal on (re)login
                 }
                 if (dbg) { fprintf(dbg, "[net] -> TERMINAL acc=%d nick=%s\n", acc, nick); fflush(dbg); }
@@ -349,6 +350,33 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 if (body.size() >= 2) {
                     uint16_t cnt = ntohs(*reinterpret_cast<uint16_t*>(body.data()));
                     g_online_count = (int)cnt;
+
+                    // PlayerInfo wire layout (network byte order):
+                    //   player_id(4) nickname(32) sector_x(4) sector_y(4) sector_z(4)
+                    constexpr size_t STRIDE = 4 + NICKNAME_MAX_LEN + 4 + 4 + 4;
+                    std::vector<MapPlayer> players;
+                    for (uint16_t i = 0; i < cnt; ++i) {
+                        size_t off = 2 + (size_t)i * STRIDE;
+                        if (off + STRIDE > body.size()) break;
+                        MapPlayer mp;
+                        uint32_t pid; std::memcpy(&pid, body.data()+off, 4);
+                        mp.id = ntohl(pid);
+                        char nm[NICKNAME_MAX_LEN+1] = {};
+                        std::memcpy(nm, body.data()+off+4, NICKNAME_MAX_LEN);
+                        mp.nick = nm;
+                        int32_t v;
+                        std::memcpy(&v, body.data()+off+4+NICKNAME_MAX_LEN,   4); mp.sx = (int32_t)ntohl((uint32_t)v);
+                        std::memcpy(&v, body.data()+off+8+NICKNAME_MAX_LEN,   4); mp.sy = (int32_t)ntohl((uint32_t)v);
+                        std::memcpy(&v, body.data()+off+12+NICKNAME_MAX_LEN,  4); mp.sz = (int32_t)ntohl((uint32_t)v);
+                        players.push_back(std::move(mp));
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(g_state_mutex);
+                        g_map_players = std::move(players);
+                        // Keep self sector in sync if the server placed us in the list.
+                        for (auto& p : g_map_players)
+                            if (p.id == g_player_id) { g_self_sx=p.sx; g_self_sy=p.sy; g_self_sz=p.sz; }
+                    }
                 }
                 break;
             }

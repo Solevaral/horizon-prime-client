@@ -9,6 +9,9 @@ std::string             g_player_nick;
 int                     g_player_access = 3;  // default: user
 bool                    g_authed        = false;
 
+int32_t                 g_self_sx = 0, g_self_sy = 0, g_self_sz = 0;
+std::vector<MapPlayer>  g_map_players;
+
 std::vector<TermLine>   g_lines;
 std::vector<ChatLine>   g_chat_lines;
 std::string             g_prompt      = "> ";

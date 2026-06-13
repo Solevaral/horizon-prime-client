@@ -50,6 +50,11 @@ int main(int argc, char* argv[]) {
     settings_load("settings.cfg");
     g_term_buf_size = g_settings.term_buffer_size;  // sync global from settings
 
+    // Pre-fill the login fields from remembered credentials (if opted in).
+    saved_login_load("login.cfg");
+    if (g_settings.remember_login) g_field_nick = g_saved_login.nick;
+    if (g_settings.remember_pass)  g_field_pass = g_saved_login.pass;
+
     std::thread net_thread(network_thread_func, host, port_str);
 
     if (!glfwInit()) { g_running=false; net_thread.join(); return 1; }
@@ -94,6 +99,18 @@ int main(int argc, char* argv[]) {
 
         terminal_render(W, H, dt);
         glfwSwapBuffers(win);
+
+        // Frame-rate cap. At 60 FPS we rely on vsync (swap interval 1); at
+        // 15/30 we additionally sleep off the surplus so the CPU/GPU idle.
+        int fps = g_settings.fps_limit;
+        if (fps == 15 || fps == 30) {
+            double target = 1.0 / fps;
+            double elapsed = glfwGetTime() - now;
+            double remain  = target - elapsed;
+            if (remain > 0.0)
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(remain));
+        }
     }
 
     g_running = false;

@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "obfuscate.h"
 #include "sound.h"
 #include "net.h"
 #include "state.h"
@@ -32,6 +33,9 @@ void settings_load(const std::string& path) {
         else if (key == "term_buffer_size") g_settings.term_buffer_size = std::clamp(val, 30, 500);
         else if (key == "language")         g_settings.language        = std::clamp(val, 0, 1);
         else if (key == "welcome_logo")     g_settings.welcome_logo    = (val != 0);
+        else if (key == "fps_limit")         g_settings.fps_limit       = (val==15||val==30||val==60) ? val : 60;
+        else if (key == "remember_login")    g_settings.remember_login  = (val != 0);
+        else if (key == "remember_pass")     g_settings.remember_pass   = (val != 0);
     }
 }
 
@@ -45,6 +49,44 @@ void settings_save(const std::string& path) {
     f << "term_buffer_size " << g_settings.term_buffer_size          << "\n";
     f << "language "         << g_settings.language                   << "\n";
     f << "welcome_logo "     << (g_settings.welcome_logo ? 1 : 0)     << "\n";
+    f << "fps_limit "        << g_settings.fps_limit                   << "\n";
+    f << "remember_login "   << (g_settings.remember_login ? 1 : 0)    << "\n";
+    f << "remember_pass "    << (g_settings.remember_pass ? 1 : 0)     << "\n";
+}
+
+// ─── Remembered login (separate file; may contain a password) ─────────────────
+SavedLogin g_saved_login;
+
+void saved_login_load(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return;
+    std::string line;
+    // Format: line 1 = nick, line 2 = pass (either may be empty).
+    if (std::getline(f, g_saved_login.nick)) {
+        // strip trailing CR (Windows line endings)
+        if (!g_saved_login.nick.empty() && g_saved_login.nick.back() == '\r')
+            g_saved_login.nick.pop_back();
+    }
+    std::string stored_pass;
+    if (std::getline(f, stored_pass)) {
+        if (!stored_pass.empty() && stored_pass.back() == '\r')
+            stored_pass.pop_back();
+        // Password is stored obfuscated (machine-bound). decrypt() returns a
+        // legacy plaintext value unchanged, and "" if the blob can't be read
+        // (e.g. login.cfg copied from another machine).
+        g_saved_login.pass = obf::decrypt(stored_pass);
+    }
+}
+
+void saved_login_save(const std::string& path) {
+    // Only persist what the user opted into; clear the file otherwise.
+    std::ofstream f(path, std::ios::trunc);
+    if (!f.is_open()) return;
+    std::string nick = g_settings.remember_login ? g_saved_login.nick : "";
+    // Obfuscate the password before it ever touches disk.
+    std::string pass = g_settings.remember_pass
+                         ? obf::encrypt(g_saved_login.pass) : "";
+    f << nick << "\n" << pass << "\n";
 }
 
 // ─── Overlay state ────────────────────────────────────────────────────────────
@@ -52,31 +94,46 @@ static int s_selected = 0;  // currently focused row
 
 struct SettingRow {
     const char* label;
-    enum Type { TOGGLE, RANGE } type;
+    enum Type { TOGGLE, RANGE, CYCLE } type;
     int min_val, max_val;
 };
+
+// FPS limit choices (cycled by the CYCLE row).
+static const int FPS_CHOICES[] = { 15, 30, 60 };
+static constexpr int FPS_CHOICE_COUNT = 3;
 
 // Language is a TOGGLE between two named choices (ENG / RU).
 static const SettingRow ROWS[] = {
     { "Language",            SettingRow::TOGGLE, 0, 1    },
     { "Welcome Logo",        SettingRow::TOGGLE, 0, 1    },
+    { "FPS Limit",           SettingRow::CYCLE,  0, FPS_CHOICE_COUNT-1 },
     { "Sounds (Beta)",       SettingRow::TOGGLE, 0, 1    },
     { "Sound Volume",        SettingRow::RANGE,  1, 10   },
     { "Scanlines",           SettingRow::TOGGLE, 0, 1    },
     { "Scanline Bright",     SettingRow::RANGE,  1, 10   },
     { "Terminal Buffer Size", SettingRow::RANGE,  30, 500 },
 };
-static constexpr int ROW_COUNT = 7;
+static constexpr int ROW_COUNT = 8;
 
+// Map fps_limit value <-> choice index (0..2).
+static int fps_to_idx(int fps) {
+    for (int i = 0; i < FPS_CHOICE_COUNT; ++i)
+        if (FPS_CHOICES[i] == fps) return i;
+    return FPS_CHOICE_COUNT - 1;  // default to 60
+}
+
+// For RANGE/TOGGLE rows get_value returns the stored value; for the CYCLE
+// (FPS) row it returns the *choice index* (0..2), not the fps number.
 static int get_value(int idx) {
     switch (idx) {
     case 0: return g_settings.language;            // 0=ENG, 1=RU
     case 1: return g_settings.welcome_logo ? 1 : 0;
-    case 2: return g_settings.sounds_enabled  ? 1 : 0;
-    case 3: return g_settings.sound_volume;
-    case 4: return g_settings.scanlines       ? 1 : 0;
-    case 5: return g_settings.scanline_bright;
-    case 6: return g_settings.term_buffer_size;
+    case 2: return fps_to_idx(g_settings.fps_limit);
+    case 3: return g_settings.sounds_enabled  ? 1 : 0;
+    case 4: return g_settings.sound_volume;
+    case 5: return g_settings.scanlines       ? 1 : 0;
+    case 6: return g_settings.scanline_bright;
+    case 7: return g_settings.term_buffer_size;
     default: return 0;
     }
 }
@@ -85,11 +142,12 @@ static void set_value(int idx, int v) {
     switch (idx) {
     case 0: g_settings.language          = std::clamp(v, 0, 1); break;
     case 1: g_settings.welcome_logo      = (v != 0); break;
-    case 2: g_settings.sounds_enabled    = (v != 0); break;
-    case 3: g_settings.sound_volume      = std::clamp(v, 1, 10); break;
-    case 4: g_settings.scanlines         = (v != 0); break;
-    case 5: g_settings.scanline_bright   = std::clamp(v, 1, 10); break;
-    case 6: g_settings.term_buffer_size  = std::clamp(v, 30, 500); break;
+    case 2: g_settings.fps_limit         = FPS_CHOICES[std::clamp(v, 0, FPS_CHOICE_COUNT-1)]; break;
+    case 3: g_settings.sounds_enabled    = (v != 0); break;
+    case 4: g_settings.sound_volume      = std::clamp(v, 1, 10); break;
+    case 5: g_settings.scanlines         = (v != 0); break;
+    case 6: g_settings.scanline_bright   = std::clamp(v, 1, 10); break;
+    case 7: g_settings.term_buffer_size  = std::clamp(v, 30, 500); break;
     }
 }
 
@@ -98,6 +156,8 @@ static void change_value(int idx, int delta) {
     int v = get_value(idx);
     if (row.type == SettingRow::TOGGLE)
         v = (v == 0) ? 1 : 0;
+    else if (row.type == SettingRow::CYCLE)
+        v = (v + (delta >= 0 ? 1 : -1) + (row.max_val+1)) % (row.max_val+1);
     else
         v = std::clamp(v + delta, row.min_val, row.max_val);
     set_value(idx, v);
@@ -239,6 +299,8 @@ void settings_render(int W, int H) {
         char val_str[32];
         if (i == 0) {  // Language row: show named choices
             std::snprintf(val_str, sizeof(val_str), "%s", v ? "RU" : "ENG");
+        } else if (row.type == SettingRow::CYCLE) {  // FPS: show the fps number
+            std::snprintf(val_str, sizeof(val_str), "%d", FPS_CHOICES[std::clamp(v,0,FPS_CHOICE_COUNT-1)]);
         } else if (row.type == SettingRow::TOGGLE) {
             std::snprintf(val_str, sizeof(val_str), "%s", v ? "On" : "Off");
         } else {
@@ -294,13 +356,15 @@ void settings_render(int W, int H) {
     case 0: desc = ru ? "  Язык игры: ENG / RU" : "  Game language: ENG / RU"; break;
     case 1: desc = ru ? "  Показывать лого дня при каждом входе"
                       : "  Show the daily logo on every login"; break;
-    case 2: desc = ru ? "  Включить/выключить звуки (Beta)"
+    case 2: desc = ru ? "  Ограничение кадров: 15 / 30 / 60 FPS"
+                      : "  Frame rate cap: 15 / 30 / 60 FPS"; break;
+    case 3: desc = ru ? "  Включить/выключить звуки (Beta)"
                       : "  Enable/disable sounds (experimental)"; break;
-    case 3: desc = ru ? "  Громкость звука (1-10)" : "  Sound volume (1-10)"; break;
-    case 4: desc = ru ? "  Включить/выключить растровые линии на экране"
+    case 4: desc = ru ? "  Громкость звука (1-10)" : "  Sound volume (1-10)"; break;
+    case 5: desc = ru ? "  Включить/выключить растровые линии на экране"
                       : "  Enable/disable scanlines"; break;
-    case 5: desc = ru ? "  Яркость растровых линий (1-10)" : "  Scanline brightness (1-10)"; break;
-    case 6: desc = ru ? "  Объём буфера терминала: 30-500 строк" : "  Terminal buffer: 30-500 lines"; break;
+    case 6: desc = ru ? "  Яркость растровых линий (1-10)" : "  Scanline brightness (1-10)"; break;
+    case 7: desc = ru ? "  Объём буфера терминала: 30-500 строк" : "  Terminal buffer: 30-500 lines"; break;
     }
     if (desc) {
         float dh = ch + 6.0f;

@@ -9,6 +9,7 @@
 #include "stat_overlay.h"
 #include "scrollback_overlay.h"
 #include "report_overlay.h"
+#include "map_overlay.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -226,6 +227,65 @@ float term_draw_string(float x, float y, const char* text,
 float term_string_width(const char* text) { return string_width(text); }
 float term_cell_h()                       { return g_cell_h; }
 
+// ─── Login screen layout ──────────────────────────────────────────────────────
+// Geometry shared between render_login and the mouse hit-testing so clicks line
+// up with what is drawn. Recomputed from the framebuffer size each use.
+struct LoginLayout {
+    float fX, fW, fH;
+    float fY1, fY2;          // nick / pass field tops
+    float cbY;               // checkbox row top
+    float cb_login_x, cb_pass_x, cb_box;  // checkbox boxes
+    float bY, bW, bH;        // buttons
+    float b_login_x, b_reg_x;
+};
+
+static LoginLayout login_layout(int W, int H) {
+    LoginLayout L;
+    float cx = W * 0.5f, cy = H * 0.5f;
+    L.fW = 360.0f; L.fX = cx - L.fW * 0.5f; L.fH = 40.0f;
+    L.fY1 = cy - 68; L.fY2 = L.fY1 + 56;
+    L.cbY = L.fY2 + L.fH + 10.0f;
+    L.cb_box = 16.0f;
+    L.cb_login_x = L.fX;
+    L.cb_pass_x  = L.fX + L.fW * 0.5f;
+    L.bY = L.cbY + L.cb_box + 14.0f; L.bW = 170.0f; L.bH = 34.0f;
+    L.b_login_x = L.fX;
+    L.b_reg_x   = L.fX + L.fW - L.bW;
+    return L;
+}
+
+static bool in_rect(float mx, float my, float x, float y, float w, float h) {
+    return mx >= x && mx <= x + w && my >= y && my <= y + h;
+}
+
+// Submits credentials (login or register). Shared by the Enter/F2 keys and the
+// on-screen buttons. Also persists remembered credentials per the checkboxes.
+static void login_submit(GLFWwindow* /*win*/, bool do_register) {
+    if (g_field_nick.empty() || g_field_pass.empty()) return;
+    if (g_conn_status != ConnStatus::ONLINE) {
+        g_auth_error = "Server is offline. Connecting...";
+        return;
+    }
+    if (do_register) {
+        // Quick local checks for registration (server re-validates anyway).
+        if (g_field_nick.size() < 4) {
+            g_auth_error = "Nickname must be at least 4 characters.";
+            return;
+        }
+        if (g_field_pass.size() < 5) {
+            g_auth_error = "Password must be at least 5 characters.";
+            return;
+        }
+    }
+    // Persist remembered credentials before sending.
+    g_saved_login.nick = g_field_nick;
+    g_saved_login.pass = g_field_pass;
+    saved_login_save("login.cfg");
+
+    g_auth_error.clear();
+    net_send_login(g_field_nick, g_field_pass, do_register);
+}
+
 // ─── Login screen ─────────────────────────────────────────────────────────────
 static void render_login(int W, int H) {
     glClearColor(0.03f, 0.03f, 0.08f, 1.0f);
@@ -264,21 +324,19 @@ static void render_login(int W, int H) {
     glEnd();
 
     // Fields
-    float fW = 360.0f, fX = cx - fW*0.5f, fH = 40.0f;
-    float fY1 = cy - 68, fY2 = fY1 + 56;
+    LoginLayout L = login_layout(W, H);
+    float fX = L.fX, fW = L.fW, fH = L.fH, fY1 = L.fY1, fY2 = L.fY2;
 
     bool nf = (g_focused_login == 0), pf = (g_focused_login == 1);
 
     // Nick field
     draw_rect(fX, fY1, fW, fH, 0.05f,0.05f,0.12f);
-    float nb = nf ? 0.4f : 0.18f;
     glColor4f(nf?0.35f:0.15f, nf?0.50f:0.18f, nf?1.0f:0.40f, 1.0f);
     glLineWidth(nf?1.8f:1.0f);
     glBegin(GL_LINE_LOOP);
         glVertex2f(fX,fY1); glVertex2f(fX+fW,fY1);
         glVertex2f(fX+fW,fY1+fH); glVertex2f(fX,fY1+fH);
     glEnd();
-    (void)nb;
     draw_string(fX+10, fY1+8, "Nickname:", 0.30f,0.40f,0.70f);
     std::string nd = g_field_nick + (nf ? "_" : "");
     draw_string(fX+120, fY1+8, nd.c_str(), 0.85f,0.92f,1.0f);
@@ -295,22 +353,45 @@ static void render_login(int W, int H) {
     std::string pd = std::string(g_field_pass.size(),'*') + (pf ? "_" : "");
     draw_string(fX+120, fY2+8, pd.c_str(), 0.85f,0.92f,1.0f);
 
+    // ── Remember checkboxes ───────────────────────────────────────────────────
+    bool ru = (g_settings.language == 1);
+    auto draw_checkbox = [&](float bx, float by, bool checked, const char* label) {
+        draw_rect(bx, by, L.cb_box, L.cb_box, 0.05f,0.05f,0.12f);
+        glColor3f(0.25f,0.35f,0.70f); glLineWidth(1.2f);
+        glBegin(GL_LINE_LOOP);
+            glVertex2f(bx, by); glVertex2f(bx+L.cb_box, by);
+            glVertex2f(bx+L.cb_box, by+L.cb_box); glVertex2f(bx, by+L.cb_box);
+        glEnd();
+        if (checked) {
+            glColor3f(0.30f,0.85f,0.45f); glLineWidth(2.0f);
+            glBegin(GL_LINES);
+                glVertex2f(bx+3, by+L.cb_box*0.55f); glVertex2f(bx+L.cb_box*0.45f, by+L.cb_box-3);
+                glVertex2f(bx+L.cb_box*0.45f, by+L.cb_box-3); glVertex2f(bx+L.cb_box-3, by+3);
+            glEnd();
+        }
+        draw_string(bx + L.cb_box + 6, by - 1, label, 0.55f,0.62f,0.80f);
+    };
+    draw_checkbox(L.cb_login_x, L.cbY, g_settings.remember_login,
+                  ru ? "запомнить логин"  : "remember login");
+    draw_checkbox(L.cb_pass_x,  L.cbY, g_settings.remember_pass,
+                  ru ? "запомнить пароль" : "remember password");
+
     // Buttons
-    float bY = fY2 + fH + 14, bW = 170;
-    draw_rect(fX, bY, bW, 34, 0.04f,0.18f,0.06f);
+    float bY = L.bY, bW = L.bW;
+    draw_rect(L.b_login_x, bY, bW, L.bH, 0.04f,0.18f,0.06f);
     glColor3f(0.15f,0.65f,0.20f); glLineWidth(1.2f);
     glBegin(GL_LINE_LOOP);
-        glVertex2f(fX,bY); glVertex2f(fX+bW,bY);
-        glVertex2f(fX+bW,bY+34); glVertex2f(fX,bY+34);
+        glVertex2f(L.b_login_x,bY); glVertex2f(L.b_login_x+bW,bY);
+        glVertex2f(L.b_login_x+bW,bY+L.bH); glVertex2f(L.b_login_x,bY+L.bH);
     glEnd();
-    draw_string(fX+12, bY+8, "Enter  - Login", 0.25f,0.90f,0.30f);
+    draw_string(L.b_login_x+12, bY+8, "Enter  - Login", 0.25f,0.90f,0.30f);
 
-    float b2x = fX + fW - bW;
-    draw_rect(b2x, bY, bW, 34, 0.04f,0.05f,0.20f);
+    float b2x = L.b_reg_x;
+    draw_rect(b2x, bY, bW, L.bH, 0.04f,0.05f,0.20f);
     glColor3f(0.15f,0.20f,0.65f); glLineWidth(1.2f);
     glBegin(GL_LINE_LOOP);
         glVertex2f(b2x,bY); glVertex2f(b2x+bW,bY);
-        glVertex2f(b2x+bW,bY+34); glVertex2f(b2x,bY+34);
+        glVertex2f(b2x+bW,bY+L.bH); glVertex2f(b2x,bY+L.bH);
     glEnd();
     draw_string(b2x+12, bY+8, "F2  - Register", 0.35f,0.40f,0.90f);
 
@@ -593,6 +674,14 @@ void terminal_render(int W, int H, float dt) {
         render_login(W, H);
     } else if (scene_active) {
         render_scene(W, H, dt);
+    } else if (g_map_open) {
+        // The galaxy map is a full-screen "camera". Don't draw the terminal or
+        // chat underneath it — otherwise server text keeps showing through and
+        // looks like garbage behind the map.
+        glClearColor(0.01f, 0.01f, 0.03f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        set_ortho(W, H);
+        glDisable(GL_DEPTH_TEST);
     } else {
         render_terminal(W, H, dt);
         // Chat overlay on top of terminal (not during scenes)
@@ -627,6 +716,13 @@ void terminal_render(int W, int H, float dt) {
         set_ortho(W, H);
         glDisable(GL_DEPTH_TEST);
         report_render(W, H);
+    }
+
+    // Galaxy map overlay
+    if (g_screen != Screen::LOGIN && g_map_open) {
+        set_ortho(W, H);
+        glDisable(GL_DEPTH_TEST);
+        map_render(W, H, dt);
     }
 }
 
@@ -700,35 +796,20 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             else                      g_field_pass.clear();
             return;
         }
-        if ((key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER)
-            && !g_field_nick.empty() && !g_field_pass.empty()) {
-            if (g_conn_status != ConnStatus::ONLINE) {
-                g_auth_error = "Server is offline. Connecting...";
-                return;
-            }
-            g_auth_error.clear();
-            net_send_login(g_field_nick, g_field_pass, false);
+        if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
+            login_submit(win, false);
             return;
         }
-        if (key == GLFW_KEY_F2
-            && !g_field_nick.empty() && !g_field_pass.empty()) {
-            if (g_conn_status != ConnStatus::ONLINE) {
-                g_auth_error = "Server is offline. Connecting...";
-                return;
-            }
-            // Quick local checks for registration (server re-validates anyway).
-            if (g_field_nick.size() < 4) {
-                g_auth_error = "Nickname must be at least 4 characters.";
-                return;
-            }
-            if (g_field_pass.size() < 5) {
-                g_auth_error = "Password must be at least 5 characters.";
-                return;
-            }
-            g_auth_error.clear();
-            net_send_login(g_field_nick, g_field_pass, true);
+        if (key == GLFW_KEY_F2) {
+            login_submit(win, true);
             return;
         }
+        return;
+    }
+
+    // Map overlay has top priority while open
+    if (g_map_open) {
+        map_on_key(key, action);
         return;
     }
 
@@ -892,6 +973,21 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
                     net_send_input("report");  // server replies with S_REPORT_LIST
                     return;
                 }
+                if (lc == "map") {
+                    g_map_open = true;
+                    sound_play(SoundEvent::CMD_CLEAR);
+                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
+                        g_cmd_history.push_back(g_input_buf);
+                    g_history_idx = -1; g_history_saved.clear();
+                    std::string echo;
+                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
+                    { std::lock_guard<std::mutex> lock(g_state_mutex);
+                      g_lines.push_back({echo, 120, 160, 120});
+                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
+                    g_input_buf.clear();
+                    g_scroll_offset = 0;
+                    return;
+                }
                 if (lc == "scr") {
                     g_scr_open = true;
                     sound_play(SoundEvent::CMD_CLEAR);
@@ -1009,10 +1105,14 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             { "eng",        3 },
             { "who",        3 },
             { "scan",       3 },
+            { "scan dock",  3 },
+            { "dock to",    3 },
+            { "undock",     3 },
             { "stat",       3 },
             { "say",        3 },
             { "warp",       3 },
             { "scr",        3 },
+            { "map",        3 },
             { "clear",      3 },
             { "stars",      3 },
             { "settings",   3 },
@@ -1029,6 +1129,7 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
             { "admin mute",     2 },
             { "admin unmute",   2 },
             { "admin announce", 2 },
+            { "admin station rename", 0 },
             { "admin setaccess",0 },  // admin only
             { "admin ban",      0 },  // admin only
             { "admin unban",    0 },  // admin only
@@ -1097,12 +1198,59 @@ void terminal_cb_cursor_pos(GLFWwindow* win, double mx, double my) {
 void terminal_cb_mouse_button(GLFWwindow* win, int button, int action, int) {
     double mx, my;
     glfwGetCursorPos(win, &mx, &my);
+
+    // Cursor pos is in window coords; the UI is laid out in framebuffer coords.
+    // Scale so clicks land correctly on HiDPI / scaled displays.
+    int ww, wh, fw, fh;
+    glfwGetWindowSize(win, &ww, &wh);
+    glfwGetFramebufferSize(win, &fw, &fh);
+    if (ww > 0 && wh > 0) {
+        mx *= (double)fw / ww;
+        my *= (double)fh / wh;
+    }
+
     if (g_settings_open) {
         settings_on_mouse_button((float)mx, (float)my, button, action);
+        return;
+    }
+
+    // ── Login screen: clickable fields, checkboxes and buttons ────────────────
+    if (g_screen == Screen::LOGIN) {
+        if (button != GLFW_MOUSE_BUTTON_LEFT || action != GLFW_PRESS) return;
+        LoginLayout L = login_layout(fw, fh);
+        float fmx = (float)mx, fmy = (float)my;
+
+        if (in_rect(fmx, fmy, L.fX, L.fY1, L.fW, L.fH)) { g_focused_login = 0; return; }
+        if (in_rect(fmx, fmy, L.fX, L.fY2, L.fW, L.fH)) { g_focused_login = 1; return; }
+
+        // "remember login" checkbox (hit area covers box + label)
+        if (in_rect(fmx, fmy, L.cb_login_x, L.cbY, L.fW * 0.5f, L.cb_box)) {
+            g_settings.remember_login = !g_settings.remember_login;
+            if (!g_settings.remember_login) g_settings.remember_pass = false;  // pass implies login
+            settings_save("settings.cfg");
+            saved_login_save("login.cfg");
+            return;
+        }
+        // "remember password" checkbox
+        if (in_rect(fmx, fmy, L.cb_pass_x, L.cbY, L.fW * 0.5f, L.cb_box)) {
+            g_settings.remember_pass = !g_settings.remember_pass;
+            if (g_settings.remember_pass) g_settings.remember_login = true;  // implies login
+            settings_save("settings.cfg");
+            saved_login_save("login.cfg");
+            return;
+        }
+
+        if (in_rect(fmx, fmy, L.b_login_x, L.bY, L.bW, L.bH)) { login_submit(win, false); return; }
+        if (in_rect(fmx, fmy, L.b_reg_x,   L.bY, L.bW, L.bH)) { login_submit(win, true);  return; }
+        return;
     }
 }
 
 void terminal_cb_scroll(GLFWwindow*, double /*xoffset*/, double yoffset) {
+    if (g_map_open) {
+        map_on_scroll(yoffset);
+        return;
+    }
     if (g_scr_open) {
         scr_on_scroll(yoffset);
         return;

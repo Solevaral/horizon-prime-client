@@ -19,6 +19,8 @@ set(HP_CLIENT_SOURCES
     src/stat_overlay.cpp
     src/scrollback_overlay.cpp
     src/report_overlay.cpp
+    src/map_overlay.cpp
+    src/obfuscate.cpp
 )
 
 if(WIN32)
