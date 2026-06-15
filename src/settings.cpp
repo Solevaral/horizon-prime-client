@@ -161,9 +161,7 @@ static void change_value(int idx, int delta) {
     else
         v = std::clamp(v + delta, row.min_val, row.max_val);
     set_value(idx, v);
-    // Language change takes effect on the server immediately.
-    if (idx == 0 && g_screen != Screen::LOGIN)
-        net_send_input(g_settings.language ? "RU" : "ENG");
+    // Language is a client-side display setting in v3.
     if (g_settings.sounds_enabled)
         sound_play(SoundEvent::KEY_TYPE);
 }

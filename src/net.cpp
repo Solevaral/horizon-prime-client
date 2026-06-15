@@ -1,16 +1,11 @@
 #include "net.h"
 #include "state.h"
 #include "sound.h"
-#include "stat_overlay.h"
-#include "report_overlay.h"
-#include "settings.h"
 
 #include <cstring>
 #include <algorithm>
 #include <thread>
 #include <chrono>
-#include <iostream>
-#include <iomanip>
 
 #ifdef _WIN32
   #include <winsock2.h>
@@ -18,8 +13,6 @@
   #include <arpa/inet.h>
 #endif
 
-// Used only to wake the GLFW event loop from this network thread (e.g. when a
-// server-driven `exit` flips g_running): glfwPostEmptyEvent is thread-safe.
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -27,8 +20,24 @@ tcp::socket* g_socket = nullptr;
 
 void net_send(const void* data, size_t len) {
     if (!g_socket) return;
+    try { asio::write(*g_socket, asio::buffer(data, len)); } catch (...) {}
+}
+
+// Tell the server we're leaving and tear down the socket. Closing the socket
+// unblocks the synchronous asio::read in the network thread so it can exit and
+// the main thread's join() returns instead of hanging the process forever.
+void net_shutdown() {
+    if (!g_socket) return;
     try {
-        asio::write(*g_socket, asio::buffer(data, len));
+        PacketHeader bye{};
+        bye.type     = MsgType::C_DISCONNECT;
+        bye.body_len = htons(0);
+        asio::write(*g_socket, asio::buffer(&bye, sizeof(bye)));
+    } catch (...) {}
+    try {
+        std::error_code ec;
+        g_socket->shutdown(tcp::socket::shutdown_both, ec);
+        g_socket->close(ec);
     } catch (...) {}
 }
 
@@ -39,55 +48,109 @@ void net_send_login(const std::string& nick, const std::string& pass, bool do_re
     auto* hdr = reinterpret_cast<PacketHeader*>(pkt.data());
     hdr->type     = type;
     hdr->body_len = htons(body_len);
-    std::strncpy(pkt.data() + sizeof(PacketHeader),                        nick.c_str(), NICKNAME_MAX_LEN-1);
-    std::strncpy(pkt.data() + sizeof(PacketHeader) + NICKNAME_MAX_LEN, pass.c_str(), PASSWORD_MAX_LEN-1);
+    std::strncpy(pkt.data() + sizeof(PacketHeader),                    nick.c_str(), NICKNAME_MAX_LEN - 1);
+    std::strncpy(pkt.data() + sizeof(PacketHeader) + NICKNAME_MAX_LEN, pass.c_str(), PASSWORD_MAX_LEN - 1);
     net_send(pkt.data(), pkt.size());
 }
 
-void net_send_input(const std::string& text) {
-    uint16_t body_len = MESSAGE_MAX_LEN;
-    std::vector<char> pkt(sizeof(PacketHeader) + body_len, 0);
+void net_send_move(int tile_x, int tile_y) {
+    PktMoveTo p{};
+    p.header.type     = MsgType::C_MOVE_TO;
+    p.header.body_len = htons(8);
+    p.tile_x = htonl((uint32_t)tile_x);
+    p.tile_y = htonl((uint32_t)tile_y);
+    net_send(&p, sizeof(PacketHeader) + 8);
+}
+
+void net_send_interact(uint8_t object_id, uint8_t action) {
+    PktInteract p{};
+    p.header.type     = MsgType::C_INTERACT;
+    p.header.body_len = htons(2);
+    p.object_id = object_id;
+    p.action    = action;
+    net_send(&p, sizeof(PacketHeader) + 2);
+}
+
+void net_send_chat(const std::string& text) {
+    uint16_t body = MESSAGE_MAX_LEN;
+    std::vector<char> pkt(sizeof(PacketHeader) + body, 0);
     auto* hdr = reinterpret_cast<PacketHeader*>(pkt.data());
-    hdr->type     = MsgType::C_INPUT;
-    hdr->body_len = htons(body_len);
-    std::strncpy(pkt.data() + sizeof(PacketHeader), text.c_str(), MESSAGE_MAX_LEN-1);
+    hdr->type     = MsgType::C_CHAT;
+    hdr->body_len = htons(body);
+    std::strncpy(pkt.data() + sizeof(PacketHeader), text.c_str(), MESSAGE_MAX_LEN - 1);
     net_send(pkt.data(), pkt.size());
 }
 
-// ─── Receive loop ─────────────────────────────────────────────────────────────
-static void push_line(const char* text, uint8_t r, uint8_t g, uint8_t b, uint8_t flags=0) {
-    std::lock_guard<std::mutex> lock(g_state_mutex);
-    if (flags & TERM_FLAG_OVERWRITE) {
-        // Replace last overwrite line if exists, otherwise append
-        for (int i = (int)g_lines.size() - 1; i >= 0; --i) {
-            if (g_lines[i].flags & TERM_FLAG_OVERWRITE) {
-                g_lines[i] = {std::string(text), r, g, b, flags};
-                return;
-            }
-        }
-    }
-    g_lines.push_back({std::string(text), r, g, b, flags});
-    if ((int)g_lines.size() > g_term_buf_size)
-        g_lines.erase(g_lines.begin());
+void net_send_command(const std::string& text) {
+    uint16_t body = MESSAGE_MAX_LEN;
+    std::vector<char> pkt(sizeof(PacketHeader) + body, 0);
+    auto* hdr = reinterpret_cast<PacketHeader*>(pkt.data());
+    hdr->type     = MsgType::C_COMMAND;
+    hdr->body_len = htons(body);
+    std::strncpy(pkt.data() + sizeof(PacketHeader), text.c_str(), MESSAGE_MAX_LEN - 1);
+    net_send(pkt.data(), pkt.size());
 }
 
+// Return to the login screen without quitting: notify the server, drop the
+// socket (so the read loop exits), and let the network thread reconnect for a
+// fresh login session.
+static void reset_to_login();  // fwd
+void net_logout() {
+    g_logout_requested = true;
+    if (g_socket) {
+        try {
+            PacketHeader bye{};
+            bye.type     = MsgType::C_DISCONNECT;
+            bye.body_len = htons(0);
+            asio::write(*g_socket, asio::buffer(&bye, sizeof(bye)));
+        } catch (...) {}
+        try {
+            std::error_code ec;
+            g_socket->shutdown(tcp::socket::shutdown_both, ec);
+            g_socket->close(ec);
+        } catch (...) {}
+    }
+    reset_to_login();
+    g_screen = Screen::LOGIN;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 static double net_uptime() {
     static auto start = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(
         std::chrono::steady_clock::now() - start).count();
 }
 
+static void push_term(const char* text, uint8_t r, uint8_t g, uint8_t b) {
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+    g_term.push_back({ std::string(text), r, g, b });
+    if ((int)g_term.size() > MAX_TERM_LINES) g_term.erase(g_term.begin());
+}
+
 static void push_chat(const char* text, uint8_t r, uint8_t g, uint8_t b) {
     std::lock_guard<std::mutex> lock(g_state_mutex);
-    g_chat_lines.push_back({std::string(text), r, g, b, net_uptime()});
-    if ((int)g_chat_lines.size() > MAX_CHAT_LINES)
-        g_chat_lines.erase(g_chat_lines.begin());
+    g_chat_lines.push_back({ std::string(text), r, g, b, net_uptime() });
+    if ((int)g_chat_lines.size() > MAX_CHAT_LINES) g_chat_lines.erase(g_chat_lines.begin());
+}
+
+static void reset_to_login() {
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+    g_entities.clear();
+    g_term.clear();
+    g_chat_lines.clear();
+    g_input_buf.clear();
+    g_term_open = false;
+    g_pause_menu = false;
+    g_authed    = false;
+    g_player_id = 0;
+    g_player_nick.clear();
+    g_field_nick.clear();
+    g_field_pass.clear();
+    g_focused_login = 0;
+    g_riding = false;
 }
 
 void network_thread_func(const std::string& host, const std::string& port) {
-    // Debug log to file
-    static FILE* dbg = fopen("net_debug.log", "w");
-    if (dbg) { fprintf(dbg, "network_thread started\n"); fflush(dbg); }
   while (g_running) {
     g_logout_requested = false;
     g_conn_status = ConnStatus::CONNECTING;
@@ -101,7 +164,7 @@ void network_thread_func(const std::string& host, const std::string& port) {
         g_connected   = true;
         g_conn_status = ConnStatus::ONLINE;
 
-        // Announce our protocol version first; the server rejects mismatches.
+        // Hello: announce protocol version.
         {
             std::vector<char> hello(sizeof(PacketHeader) + sizeof(uint32_t), 0);
             auto* h = reinterpret_cast<PacketHeader*>(hello.data());
@@ -120,321 +183,153 @@ void network_thread_func(const std::string& host, const std::string& port) {
             PacketHeader hdr{};
             read_exact(&hdr, sizeof(hdr));
             uint16_t body_len = ntohs(hdr.body_len);
-            if (dbg) { fprintf(dbg, "[net] pkt type=0x%02x body_len=%u\n", (int)hdr.type, body_len); fflush(dbg); }
             std::vector<char> body(body_len, 0);
             if (body_len > 0) read_exact(body.data(), body_len);
 
             switch (hdr.type) {
 
             case MsgType::S_AUTH_OK: {
-                if (dbg) { fprintf(dbg, "[net] S_AUTH_OK body=%zu need=%zu\n", body.size(), sizeof(PktAuthOk)-sizeof(PacketHeader)); fflush(dbg); }
-                // body: player_id(4)+sx(4)+sy(4)+sz(4)+access(4)+nickname(32) = 52
-                if (body.size() < 20) {
-                    if (dbg) { fprintf(dbg, "[net] S_AUTH_OK TOO SMALL\n"); fflush(dbg); }
-                    break;
-                }
-                // body layout: player_id(4), sector_x(4), sector_y(4), sector_z(4), access(4), nickname(32)
-                uint32_t pid; std::memcpy(&pid, body.data() +  0, 4); pid = ntohl(pid);
-                int32_t  sx;  std::memcpy(&sx,  body.data() +  4, 4); sx  = (int32_t)ntohl((uint32_t)sx);
-                int32_t  sy;  std::memcpy(&sy,  body.data() +  8, 4); sy  = (int32_t)ntohl((uint32_t)sy);
-                int32_t  sz;  std::memcpy(&sz,  body.data() + 12, 4); sz  = (int32_t)ntohl((uint32_t)sz);
-                uint32_t acc_raw; std::memcpy(&acc_raw, body.data() + 16, 4); int acc = (int)ntohl(acc_raw);
-                char nick[NICKNAME_MAX_LEN+1] = {};
-                std::memcpy(nick, body.data() + 20, std::min((size_t)NICKNAME_MAX_LEN, body.size() - 20));
+                if (body.size() < 20) break;
+                uint32_t pid; std::memcpy(&pid, body.data() + 0, 4); pid = ntohl(pid);
+                uint32_t acc; std::memcpy(&acc, body.data() + 16, 4);
+                char nick[NICKNAME_MAX_LEN + 1] = {};
+                std::memcpy(nick, body.data() + 20,
+                            std::min((size_t)NICKNAME_MAX_LEN, body.size() - 20));
                 {
                     std::lock_guard<std::mutex> lock(g_state_mutex);
                     g_player_id     = pid;
-                    g_player_access = acc;
+                    g_player_access = (int)ntohl(acc);
                     g_player_nick   = nick;
                     g_authed        = true;
-                    g_self_sx = sx; g_self_sy = sy; g_self_sz = sz;
-                    g_lines.clear();  // clear terminal on (re)login
+                    g_entities.clear();
+                    g_term.clear();
                 }
-                if (dbg) { fprintf(dbg, "[net] -> TERMINAL acc=%d nick=%s\n", acc, nick); fflush(dbg); }
-                g_screen = Screen::TERMINAL;
+                g_screen = Screen::WORLD;
                 sound_play(SoundEvent::AUTH_OK);
-                push_line("", 40, 40, 40);
-                push_line("  HORIZON PRIME  //  Terminal v1.1", 80, 160, 255);
-                push_line("", 40, 40, 40);
-                char welcome[128];
-                std::snprintf(welcome, sizeof(welcome), "  Welcome, %s.", nick);
-                push_line(welcome, 150, 220, 150);
-                push_line("  Type 'help' to see available commands.", 100, 150, 100);
-                push_line("", 40, 40, 40);
-                // Optionally request the daily logo. Language is chosen on the
-                // server (bilingual prompt for new players) or via Settings.
-                if (g_settings.welcome_logo)
-                    net_send_input("logo");
+                push_term("  HORIZON PRIME — boarded.", 80, 160, 255);
+                push_term("  Left-click to walk. Right-click the ship to board.", 140, 170, 200);
                 break;
             }
 
             case MsgType::S_AUTH_FAIL: {
                 char reason[129] = {};
                 std::memcpy(reason, body.data(), std::min((size_t)128, body.size()));
-                {
-                    std::lock_guard<std::mutex> lock(g_state_mutex);
-                    g_auth_error = reason;
-                }
+                { std::lock_guard<std::mutex> lock(g_state_mutex); g_auth_error = reason; }
                 sound_play(SoundEvent::AUTH_FAIL);
                 break;
             }
 
-            case MsgType::S_CHAT: {
-                // Legacy chat — show as terminal line
-                char sender[NICKNAME_MAX_LEN+1] = {};
-                char text[MESSAGE_MAX_LEN+1]    = {};
-                std::memcpy(sender, body.data(), std::min(body.size(), (size_t)NICKNAME_MAX_LEN));
-                if (body.size() > NICKNAME_MAX_LEN)
-                    std::memcpy(text, body.data()+NICKNAME_MAX_LEN,
-                                std::min(body.size()-NICKNAME_MAX_LEN, (size_t)MESSAGE_MAX_LEN));
-                char line[NICKNAME_MAX_LEN + MESSAGE_MAX_LEN + 8];
-                std::snprintf(line, sizeof(line), "  [%s] %s", sender, text);
-                push_line(line, 120, 180, 255);
-                break;
-            }
-
-            case MsgType::S_PLAYER_JOIN: {
-                char nick[NICKNAME_MAX_LEN+1] = {};
-                std::memcpy(nick, body.data()+sizeof(uint32_t), NICKNAME_MAX_LEN);
-                char line[64]; std::snprintf(line, sizeof(line), "  * %s connected", nick);
-                push_line(line, 80, 200, 80);
-                sound_play(SoundEvent::PLAYER_JOIN);
-                break;
-            }
-
-            case MsgType::S_PLAYER_LEAVE: {
-                char nick[NICKNAME_MAX_LEN+1] = {};
-                if (body.size() > sizeof(uint32_t))
-                    std::memcpy(nick, body.data()+sizeof(uint32_t), NICKNAME_MAX_LEN);
-                char line[64]; std::snprintf(line, sizeof(line), "  * %s disconnected", nick);
-                push_line(line, 150, 100, 80);
-                sound_play(SoundEvent::PLAYER_LEAVE);
-                break;
-            }
-
-            // ── Terminal render packets ──────────────────────────────────────
-            case MsgType::S_TERM_CLEAR: {
+            case MsgType::S_SECTOR_LOAD: {
+                if (body.size() < (size_t)(sizeof(PktSectorLoad) - sizeof(PacketHeader))) break;
+                auto rd = [&](int off) {
+                    int32_t v; std::memcpy(&v, body.data() + off, 4);
+                    return (int)(int32_t)ntohl((uint32_t)v);
+                };
                 std::lock_guard<std::mutex> lock(g_state_mutex);
-                g_lines.clear();
+                g_sector.sector_x    = rd(0);
+                g_sector.sector_y    = rd(4);
+                g_sector.sector_z    = rd(8);
+                g_sector.tiles_x     = rd(12);
+                g_sector.tiles_y     = rd(16);
+                g_sector.ship_tile_x = rd(20);
+                g_sector.ship_tile_y = rd(24);
+                g_sector.star_class  = body[28];
+                char nm[49] = {};
+                std::memcpy(nm, body.data() + 29, std::min((size_t)48, body.size() - 29));
+                g_sector.star_name = nm;
+                break;
+            }
+
+            case MsgType::S_ENTITY_STATE: {
+                if (body.size() < 2) break;
+                uint16_t cnt = ntohs(*reinterpret_cast<uint16_t*>(body.data()));
+                constexpr size_t STRIDE = 4 + 4 + 4 + 1 + 1 + NICKNAME_MAX_LEN;
+                std::lock_guard<std::mutex> lock(g_state_mutex);
+                std::unordered_map<uint32_t, Entity> fresh;
+                for (uint16_t i = 0; i < cnt; ++i) {
+                    size_t off = 2 + (size_t)i * STRIDE;
+                    if (off + STRIDE > body.size()) break;
+                    uint32_t id;  std::memcpy(&id, body.data() + off, 4); id = ntohl(id);
+                    int32_t tx;   std::memcpy(&tx, body.data() + off + 4, 4); tx = (int32_t)ntohl((uint32_t)tx);
+                    int32_t ty;   std::memcpy(&ty, body.data() + off + 8, 4); ty = (int32_t)ntohl((uint32_t)ty);
+                    uint8_t riding = (uint8_t)body[off + 12];
+                    uint8_t acc    = (uint8_t)body[off + 13];
+                    char nm[NICKNAME_MAX_LEN + 1] = {};
+                    std::memcpy(nm, body.data() + off + 14, NICKNAME_MAX_LEN);
+                    Entity e;
+                    e.id = id; e.tile_x = tx; e.tile_y = ty;
+                    e.riding = riding != 0; e.access = acc; e.nick = nm;
+                    // Preserve the interpolated render position across snapshots.
+                    auto it = g_entities.find(id);
+                    if (it != g_entities.end()) { e.rx = it->second.rx; e.ry = it->second.ry; }
+                    else { e.rx = (float)tx; e.ry = (float)ty; }
+                    fresh[id] = std::move(e);
+                }
+                g_entities = std::move(fresh);
+                g_online_count = (int)g_entities.size();
+                break;
+            }
+
+            case MsgType::S_ENTITY_LEAVE: {
+                if (body.size() < 4) break;
+                uint32_t id; std::memcpy(&id, body.data(), 4); id = ntohl(id);
+                std::lock_guard<std::mutex> lock(g_state_mutex);
+                g_entities.erase(id);
+                break;
+            }
+
+            case MsgType::S_RIDE_STATE: {
+                bool riding = (!body.empty() && body[0] == 1);
+                g_riding = riding;
                 break;
             }
 
             case MsgType::S_TERM_TEXT: {
-                if (body.size() < 4) break;
-                uint8_t r = (uint8_t)body[0];
-                uint8_t g = (uint8_t)body[1];
-                uint8_t b2= (uint8_t)body[2];
-                uint8_t fl= (uint8_t)body[3];
+                if (body.size() < 3) break;
+                uint8_t r = (uint8_t)body[0], g = (uint8_t)body[1], b = (uint8_t)body[2];
                 char text[481] = {};
-                std::memcpy(text, body.data()+4, std::min(body.size()-4, (size_t)480));
-                push_line(text, r, g, b2, fl);
-                // OVERWRITE flag = warp in progress; plain text = warp ended
-                if (fl & TERM_FLAG_OVERWRITE) {
-                    g_warping = true;
-                } else if (g_warping) {
-                    g_warping = false;
-                    // Seal off the finished progress-bar line(s): drop the OVERWRITE
-                    // flag so the next warp starts a fresh bar at the bottom instead
-                    // of re-using this stale anchor higher up in the buffer.
-                    std::lock_guard<std::mutex> lock(g_state_mutex);
-                    for (auto& ln : g_lines)
-                        ln.flags &= ~TERM_FLAG_OVERWRITE;
-                }
+                std::memcpy(text, body.data() + 3, std::min(body.size() - 3, (size_t)480));
+                push_term(text, r, g, b);
                 break;
             }
 
-            case MsgType::S_TERM_PROMPT: {
-                char text[65] = {};
-                std::memcpy(text, body.data(), std::min(body.size(), (size_t)64));
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                g_prompt = text;
-                break;
-            }
-
-            case MsgType::S_TERM_SCENE: {
-                if (body.empty()) break;
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                g_scene.scene_id    = (uint8_t)body[0];
-                g_scene.time_left   = (body.size() > 1 && body[1] > 0)
-                                        ? (float)(uint8_t)body[1] : 0.0f;
-                if (body.size() > 2)
-                    std::memcpy(g_scene.params, body.data()+2,
-                                std::min(body.size()-2, (size_t)127));
-                g_scene.active = (g_scene.scene_id != 255);
-                break;
-            }
-
-            case MsgType::S_TERM_ANIM: {
-                if (body.size() < 4) break;
-                uint8_t line_count = (uint8_t)body[0];
-                uint8_t r  = (uint8_t)body[1];
-                uint8_t g  = (uint8_t)body[2];
-                uint8_t b2 = (uint8_t)body[3];
-                char text[481] = {};
-                std::memcpy(text, body.data()+4, std::min(body.size()-4, (size_t)480));
-                {
-                    std::lock_guard<std::mutex> lock(g_state_mutex);
-                    // Replace last line_count lines
-                    int to_remove = std::min((int)line_count, (int)g_lines.size());
-                    g_lines.resize(g_lines.size() - to_remove);
-                    g_lines.push_back({std::string(text), r, g, b2});
-                }
+            case MsgType::S_CHAT: {
+                char sender[NICKNAME_MAX_LEN + 1] = {};
+                char text[MESSAGE_MAX_LEN + 1]    = {};
+                std::memcpy(sender, body.data(), std::min(body.size(), (size_t)NICKNAME_MAX_LEN));
+                if (body.size() > NICKNAME_MAX_LEN)
+                    std::memcpy(text, body.data() + NICKNAME_MAX_LEN,
+                                std::min(body.size() - NICKNAME_MAX_LEN, (size_t)MESSAGE_MAX_LEN));
+                char line[NICKNAME_MAX_LEN + MESSAGE_MAX_LEN + 8];
+                std::snprintf(line, sizeof(line), "%s: %s", sender, text);
+                push_chat(line, 160, 200, 255);
                 break;
             }
 
             case MsgType::S_LOGOUT: {
                 bool is_exit = (!body.empty() && body[0] == 1);
-                if (is_exit) {
-                    g_running = false;
-                    // Wake the GLFW loop so it re-checks g_running immediately;
-                    // otherwise the window stays open until the next input event
-                    // (it blocks in vsync'd glfwSwapBuffers between frames).
-                    glfwPostEmptyEvent();
-                } else {
-                    g_logout_requested = true;
-                    {
-                        std::lock_guard<std::mutex> lock(g_state_mutex);
-                        g_lines.clear();
-                        g_chat_lines.clear();
-                        g_input_buf.clear();
-                        g_prompt    = "> ";
-                        g_authed    = false;
-                        g_player_id = 0;
-                        g_player_nick.clear();
-                        g_auth_error.clear();
-                        g_field_nick.clear();
-                        g_field_pass.clear();
-                        g_focused_login = 0;
-                        g_scene.active  = false;
-                    }
-                    g_screen = Screen::LOGIN;
-                }
-                break;
-            }
-
-            case MsgType::S_TERM_CHAT: {
-                if (body.size() < 3) break;
-                uint8_t r = (uint8_t)body[0];
-                uint8_t g = (uint8_t)body[1];
-                uint8_t b = (uint8_t)body[2];
-                char text[481] = {};
-                std::memcpy(text, body.data()+3, std::min(body.size()-3, (size_t)480));
-                push_chat(text, r, g, b);
-                break;
-            }
-
-            case MsgType::S_STATS: {
-                if (body.size() >= 24) {
-                    uint32_t* stats_ptr = reinterpret_cast<uint32_t*>(body.data());
-                    int played_min = ntohl(stats_ptr[0]);
-                    int ships = ntohl(stats_ptr[1]);
-                    int npcs = ntohl(stats_ptr[2]);
-                    int quests = ntohl(stats_ptr[3]);
-                    int jumps = ntohl(stats_ptr[4]);
-                    int pms = ntohl(stats_ptr[5]);
-
-                    // Parse dates (null-terminated strings after stats)
-                    const char* created_ptr = body.data() + 24;
-                    const char* online_ptr = created_ptr + std::strlen(created_ptr) + 1;
-
-                    std::string created(created_ptr);
-                    std::string online(online_ptr);
-
-                    stat_set_data(played_min, ships, npcs, quests, jumps, pms, created, online);
-                    stat_open();
-                }
-                break;
-            }
-
-            case MsgType::S_REPORT_LIST: {
-                if (!body.empty()) {
-                    uint8_t mode = (uint8_t)body[0];
-                    std::string blob(body.data() + 1, body.size() - 1);
-                    report_set_data(mode, blob);
-                }
-                break;
-            }
-
-            case MsgType::S_WORLD_STATE: {
-                if (body.size() >= 2) {
-                    uint16_t cnt = ntohs(*reinterpret_cast<uint16_t*>(body.data()));
-                    g_online_count = (int)cnt;
-
-                    // PlayerInfo wire layout (network byte order):
-                    //   player_id(4) nickname(32) sector_x(4) sector_y(4) sector_z(4)
-                    constexpr size_t STRIDE = 4 + NICKNAME_MAX_LEN + 4 + 4 + 4;
-                    std::vector<MapPlayer> players;
-                    for (uint16_t i = 0; i < cnt; ++i) {
-                        size_t off = 2 + (size_t)i * STRIDE;
-                        if (off + STRIDE > body.size()) break;
-                        MapPlayer mp;
-                        uint32_t pid; std::memcpy(&pid, body.data()+off, 4);
-                        mp.id = ntohl(pid);
-                        char nm[NICKNAME_MAX_LEN+1] = {};
-                        std::memcpy(nm, body.data()+off+4, NICKNAME_MAX_LEN);
-                        mp.nick = nm;
-                        int32_t v;
-                        std::memcpy(&v, body.data()+off+4+NICKNAME_MAX_LEN,   4); mp.sx = (int32_t)ntohl((uint32_t)v);
-                        std::memcpy(&v, body.data()+off+8+NICKNAME_MAX_LEN,   4); mp.sy = (int32_t)ntohl((uint32_t)v);
-                        std::memcpy(&v, body.data()+off+12+NICKNAME_MAX_LEN,  4); mp.sz = (int32_t)ntohl((uint32_t)v);
-                        players.push_back(std::move(mp));
-                    }
-                    {
-                        std::lock_guard<std::mutex> lock(g_state_mutex);
-                        g_map_players = std::move(players);
-                        // Keep self sector in sync if the server placed us in the list.
-                        for (auto& p : g_map_players)
-                            if (p.id == g_player_id) { g_self_sx=p.sx; g_self_sy=p.sy; g_self_sz=p.sz; }
-                    }
-                }
+                if (is_exit) { g_running = false; glfwPostEmptyEvent(); }
+                else { g_logout_requested = true; reset_to_login(); g_screen = Screen::LOGIN; }
                 break;
             }
 
             default: break;
             }
         }
-    } catch (std::exception& e) {
-        if (dbg) { fprintf(dbg, "[net] EXCEPTION: %s\n", e.what()); fflush(dbg); }
+    } catch (std::exception&) {
         if (!g_logout_requested) {
-            if (g_screen == Screen::TERMINAL) {
-                push_line((std::string("  [!] Connection lost: ") + e.what()).c_str(),
-                          220, 80, 80);
-                // Return to login on connection loss
-                {
-                    std::lock_guard<std::mutex> lock(g_state_mutex);
-                    g_lines.clear();
-                    g_chat_lines.clear();
-                    g_input_buf.clear();
-                    g_prompt    = "> ";
-                    g_authed    = false;
-                    g_player_id = 0;
-                    g_player_nick.clear();
-                    g_auth_error.clear();
-                    g_field_nick.clear();
-                    g_field_pass.clear();
-                    g_focused_login = 0;
-                    g_scene.active  = false;
-                }
-                g_screen = Screen::LOGIN;
-            } else {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                g_auth_error = "Server offline. Retrying...";
-            }
+            if (g_screen == Screen::WORLD) { reset_to_login(); g_screen = Screen::LOGIN; }
+            else { std::lock_guard<std::mutex> lock(g_state_mutex); g_auth_error = "Server offline. Retrying..."; }
         }
     }
-    g_connected   = false;
-    g_socket      = nullptr;
-    g_conn_status = ConnStatus::OFFLINE;
+    g_connected    = false;
+    g_socket       = nullptr;
+    g_conn_status  = ConnStatus::OFFLINE;
     g_online_count = 0;
 
-    if (g_logout_requested) {
-        // Reconnect immediately for next login session
-        continue;
-    }
+    if (g_logout_requested) continue;
     if (!g_running) break;
-
-    // Auto-reconnect after 3 seconds
     for (int i = 0; i < 30 && g_running && !g_logout_requested; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  } // while g_running
+  }
 }

@@ -3,126 +3,86 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <cstdint>
 
 #include "protocol/packets.h"
 using namespace hp;
 
-// ─── Terminal line flags ──────────────────────────────────────────────────────
-constexpr uint8_t TERM_FLAG_DIM       = 0x02;  // render at reduced alpha
-constexpr uint8_t TERM_FLAG_OVERWRITE = 0x04;  // replace last line with same flag
-
-// ─── Terminal line ────────────────────────────────────────────────────────────
+// ─── Ship terminal line ───────────────────────────────────────────────────────
 struct TermLine {
     std::string text;
     uint8_t     r = 180, g = 220, b = 180;
-    uint8_t     flags = 0;
 };
 
-// ─── Chat line (separate overlay panel) ──────────────────────────────────────
+// ─── Chat line (overlay panel, fades out) ─────────────────────────────────────
 struct ChatLine {
     std::string text;
     uint8_t     r = 160, g = 200, b = 255;
-    double      timestamp = 0.0;  // glfwGetTime() when received
+    double      timestamp = 0.0;
 };
 
-// ─── Galaxy map data (from S_WORLD_STATE / S_AUTH_OK) ─────────────────────────
-struct MapPlayer {
+// ─── An entity in the current sector ──────────────────────────────────────────
+// Authoritative tile is (tile_x, tile_y); the client interpolates a render
+// position toward it for smooth movement between server ticks.
+struct Entity {
+    uint32_t id = 0;
     std::string nick;
-    int32_t     sx = 0, sy = 0, sz = 0;
-    uint32_t    id = 0;
+    int      tile_x = 0, tile_y = 0;     // authoritative target tile
+    float    rx = 0.0f, ry = 0.0f;       // interpolated render position (tiles)
+    bool     riding = false;
+    uint8_t  access = 3;
 };
 
-// ─── Ship / activity state (HUD widgets) ──────────────────────────────────────
-// Pure-presentation source for the on-screen ship model and the mining/farming
-// progress feedback. Today these are client-side stubs with sensible defaults;
-// the moment the server starts sending the real numbers we just point these at
-// the network thread instead and the widgets keep working unchanged. (Geometry,
-// rotation, lights and sparks stay client-side — they are display, not state.)
-enum class ShipActivity : uint8_t {
-    IDLE = 0,   // docked / drifting
-    MINING,     // drilling an asteroid
-    FARMING,    // tending crops
-    WARPING,    // jump sequence
-};
-
-struct ShipState {
-    uint8_t      type      = 0;       // ship class/skin id (selects voxel model)
-    float        hull      = 1.0f;    // 0..1 hull integrity
-    float        fuel      = 1.0f;    // 0..1 fuel
-    ShipActivity activity  = ShipActivity::IDLE;
-    float        progress  = 0.0f;    // 0..1 progress of current activity
-    char         target[48] = {};     // e.g. "asteroid 1" — what we're acting on
-};
-
-// Guarded by g_state_mutex.
-extern ShipState g_ship;
-
-// HUD widgets: when true, the map + ship are docked in the corners on top of the
-// terminal instead of (or in addition to) the full-screen map overlay.
-extern bool g_hud_widgets;
-
-// ─── Scene state ──────────────────────────────────────────────────────────────
-struct SceneState {
-    bool    active       = false;
-    uint8_t scene_id     = 0;
-    float   time_left    = 0.0f;  // 0 = indefinite
-    char    params[128]  = {};
+// ─── Sector description (from S_SECTOR_LOAD) ──────────────────────────────────
+struct SectorInfo {
+    int  sector_x = 0, sector_y = 0, sector_z = 0;
+    int  tiles_x = 24, tiles_y = 24;
+    int  ship_tile_x = 12, ship_tile_y = 12;
+    char star_class = 'G';
+    std::string star_name = "Unknown";
 };
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
-constexpr int MIN_TERM_LINES = 30;
-constexpr int MAX_TERM_LINES = 500;
-constexpr int DEFAULT_TERM_LINES = 128;
-
 extern std::atomic<bool>       g_running;
 extern std::atomic<bool>       g_connected;
 extern std::mutex              g_state_mutex;
 
-// Player info (set on auth)
+// Player identity (set on auth)
 extern uint32_t                g_player_id;
 extern std::string             g_player_nick;
-extern int                     g_player_access;  // 0=admin,1=mod,2=helper,3=user
+extern int                     g_player_access;
 extern bool                    g_authed;
 
-// Galaxy map: this player's current sector + all online players' sectors.
-// Updated from S_AUTH_OK (own sector) and S_WORLD_STATE (everyone). Guarded
-// by g_state_mutex.
-extern int32_t                 g_self_sx, g_self_sy, g_self_sz;
-extern std::vector<MapPlayer>  g_map_players;
+// World state (guarded by g_state_mutex)
+extern SectorInfo              g_sector;
+extern std::unordered_map<uint32_t, Entity> g_entities;
+extern std::atomic<bool>       g_riding;       // this player is in the ship cockpit
 
-// Terminal buffer
-extern std::vector<TermLine>   g_lines;       // scrollback buffer
-extern std::string             g_prompt;      // current prompt string
-extern SceneState              g_scene;
-extern int                     g_term_buf_size;  // user-configurable buffer size (30-500)
-extern bool                    g_scr_open;       // scrollback viewing mode active
-
-// Chat overlay buffer (separate from terminal output)
-constexpr int MAX_CHAT_LINES = 64;
+// Ship terminal buffer + chat
+extern std::vector<TermLine>   g_term;
+constexpr int MAX_TERM_LINES = 200;
 extern std::vector<ChatLine>   g_chat_lines;
+constexpr int MAX_CHAT_LINES = 64;
 
-// Input
-extern std::string             g_input_buf;   // current input line
-extern bool                    g_input_active;
-
-// Auth error (shown on login screen)
-extern std::string             g_auth_error;
+// Ship-terminal input line (only used while riding)
+extern std::string             g_input_buf;
+extern bool                    g_term_open;    // ship terminal panel visible
+extern bool                    g_pause_menu;   // ESC pause menu (settings/leave/quit) visible
 
 // Login screen fields
 extern std::string             g_field_nick;
 extern std::string             g_field_pass;
 extern int                     g_focused_login; // 0=nick, 1=pass
+extern std::string             g_auth_error;
 
-enum class Screen { LOGIN, TERMINAL };
+// Kept only to satisfy the settings overlay (term buffer size knob).
+extern int                     g_term_buf_size;
+
+enum class Screen { LOGIN, WORLD };
 extern std::atomic<Screen>     g_screen;
 extern std::atomic<bool>       g_logout_requested;
 
-// Server connection status shown on login screen
 enum class ConnStatus { CONNECTING, ONLINE, OFFLINE };
 extern std::atomic<ConnStatus> g_conn_status;
-extern std::atomic<int>        g_online_count;  // players online (from S_WORLD_STATE)
-extern std::atomic<bool>       g_warping;       // true while warp jump sequence is active
-
-// Forward declare for stat_overlay functions
-void stat_open();
+extern std::atomic<int>        g_online_count;

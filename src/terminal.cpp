@@ -6,11 +6,6 @@
 #include "net.h"
 #include "sound.h"
 #include "settings.h"
-#include "stat_overlay.h"
-#include "scrollback_overlay.h"
-#include "report_overlay.h"
-#include "map_overlay.h"
-#include "ship_widget.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -24,54 +19,32 @@
 #include <algorithm>
 #include <cstdlib>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 static const float PI = 3.14159265f;
 
-// ─── Font atlas ───────────────────────────────────────────────────────────────
-static stbtt_packedchar g_cdata_ascii[224];    // ASCII 32..255
-static stbtt_packedchar g_cdata_cyrillic[256]; // U+0400..U+04FF
-static GLuint           g_font_tex = 0;
-static float            g_font_size   = 17.0f;
-static float            g_cell_w      = 0.0f;
-static float            g_cell_h      = 0.0f;
-
-static const int ATLAS_W = 1024, ATLAS_H = 1024;
+// ─── Font atlas (reused from v2) ──────────────────────────────────────────────
+static stbtt_packedchar g_cdata_ascii[224];
+static stbtt_packedchar g_cdata_cyrillic[256];
+static GLuint           g_font_tex  = 0;
+static float            g_font_size = 17.0f;
+static float            g_cell_w    = 0.0f;
+static float            g_cell_h    = 0.0f;
+static const int        ATLAS_W = 1024, ATLAS_H = 1024;
 
 bool terminal_init(const char* font_path) {
     FILE* f = fopen(font_path, "rb");
     if (!f) return false;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     std::vector<uint8_t> ttf_buf(sz);
-    fread(ttf_buf.data(), 1, sz, f);
-    fclose(f);
+    fread(ttf_buf.data(), 1, sz, f); fclose(f);
 
     std::vector<uint8_t> bitmap(ATLAS_W * ATLAS_H);
-
     stbtt_pack_context pc;
-    if (!stbtt_PackBegin(&pc, bitmap.data(), ATLAS_W, ATLAS_H, 0, 1, nullptr))
-        return false;
+    if (!stbtt_PackBegin(&pc, bitmap.data(), ATLAS_W, ATLAS_H, 0, 1, nullptr)) return false;
     stbtt_PackSetOversampling(&pc, 1, 1);
-
     stbtt_pack_range ranges[2];
-    ranges[0].font_size                = g_font_size;
-    ranges[0].first_unicode_codepoint_in_range = 32;
-    ranges[0].num_chars                = 224;
-    ranges[0].chardata_for_range       = g_cdata_ascii;
-    ranges[0].array_of_unicode_codepoints = nullptr;
-
-    ranges[1].font_size                = g_font_size;
-    ranges[1].first_unicode_codepoint_in_range = 0x0400;
-    ranges[1].num_chars                = 256;
-    ranges[1].chardata_for_range       = g_cdata_cyrillic;
-    ranges[1].array_of_unicode_codepoints = nullptr;
-
-    if (!stbtt_PackFontRanges(&pc, ttf_buf.data(), 0, ranges, 2))
-        return false;
+    ranges[0] = { g_font_size, 32,     nullptr, 224, g_cdata_ascii,    0, 0 };
+    ranges[1] = { g_font_size, 0x0400, nullptr, 256, g_cdata_cyrillic, 0, 0 };
+    if (!stbtt_PackFontRanges(&pc, ttf_buf.data(), 0, ranges, 2)) return false;
     stbtt_PackEnd(&pc);
 
     glGenTextures(1, &g_font_tex);
@@ -82,10 +55,8 @@ bool terminal_init(const char* font_path) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    // Measure cell size from 'M'
-    stbtt_aligned_quad q;
-    float cx = 0, cy = 0;
-    stbtt_GetPackedQuad(g_cdata_ascii, ATLAS_W, ATLAS_H, 'M'-32, &cx, &cy, &q, 1);
+    stbtt_aligned_quad q; float cx = 0, cy = 0;
+    stbtt_GetPackedQuad(g_cdata_ascii, ATLAS_W, ATLAS_H, 'M' - 32, &cx, &cy, &q, 1);
     g_cell_w = cx;
     g_cell_h = g_font_size * 1.35f;
     return true;
@@ -95,28 +66,26 @@ void terminal_shutdown() {
     if (g_font_tex) { glDeleteTextures(1, &g_font_tex); g_font_tex = 0; }
 }
 
-// ─── 2D helpers ───────────────────────────────────────────────────────────────
+// ─── 2D text helpers ──────────────────────────────────────────────────────────
 static void set_ortho(int W, int H) {
     glViewport(0, 0, W, H);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
+    glMatrixMode(GL_PROJECTION); glLoadIdentity();
     glOrtho(0, W, H, 0, -1, 1);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
 }
 
 static void draw_rect(float x, float y, float w, float h,
-                      float r, float g, float b, float a=1.0f) {
+                      float r, float g, float b, float a = 1.0f) {
+    glDisable(GL_TEXTURE_2D);
     glColor4f(r, g, b, a);
     glBegin(GL_QUADS);
-        glVertex2f(x,   y);   glVertex2f(x+w, y);
-        glVertex2f(x+w, y+h); glVertex2f(x,   y+h);
+        glVertex2f(x, y); glVertex2f(x + w, y);
+        glVertex2f(x + w, y + h); glVertex2f(x, y + h);
     glEnd();
 }
 
-// Draw UTF-8 string using TTF atlas. Returns x advance.
 static float draw_string(float x, float y, const char* text,
-                         float r, float g, float b, float a=1.0f) {
+                         float r, float g, float b, float a = 1.0f) {
     if (!g_font_tex) return x;
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, g_font_tex);
@@ -128,39 +97,21 @@ static float draw_string(float x, float y, const char* text,
     const uint8_t* s = reinterpret_cast<const uint8_t*>(text);
     while (*s) {
         uint32_t cp;
-        if (*s < 0x80) {
-            cp = *s++;
-        } else if ((*s & 0xE0) == 0xC0) {
-            cp = (*s++ & 0x1F) << 6;
-            if (*s) cp |= (*s++ & 0x3F);
-        } else if ((*s & 0xF0) == 0xE0) {
-            cp = (*s++ & 0x0F) << 12;
-            if (*s) cp |= (*s++ & 0x3F) << 6;
-            if (*s) cp |= (*s++ & 0x3F);
-        } else if ((*s & 0xF8) == 0xF0) {
-            cp = (*s++ & 0x07) << 18;
-            if (*s) cp |= (*s++ & 0x3F) << 12;
-            if (*s) cp |= (*s++ & 0x3F) << 6;
-            if (*s) cp |= (*s++ & 0x3F);
-        } else {
-            cp = *s++; // fallback
-        }
-        stbtt_packedchar* cdata = nullptr;
-        int idx = -1;
-        if (cp >= 32 && cp < 256) {
-            cdata = g_cdata_ascii; idx = cp - 32;
-        } else if (cp >= 0x0400 && cp < 0x0500) {
-            cdata = g_cdata_cyrillic; idx = cp - 0x0400;
-        } else {
-            cx += g_cell_w; continue;
-        }
-        stbtt_aligned_quad q;
-        float bx = cx, by = baseline_y;
+        if (*s < 0x80) cp = *s++;
+        else if ((*s & 0xE0) == 0xC0) { cp = (*s++ & 0x1F) << 6; if (*s) cp |= (*s++ & 0x3F); }
+        else if ((*s & 0xF0) == 0xE0) { cp = (*s++ & 0x0F) << 12; if (*s) cp |= (*s++ & 0x3F) << 6; if (*s) cp |= (*s++ & 0x3F); }
+        else if ((*s & 0xF8) == 0xF0) { cp = (*s++ & 0x07) << 18; if (*s) cp |= (*s++ & 0x3F) << 12; if (*s) cp |= (*s++ & 0x3F) << 6; if (*s) cp |= (*s++ & 0x3F); }
+        else cp = *s++;
+        stbtt_packedchar* cdata = nullptr; int idx = -1;
+        if (cp >= 32 && cp < 256) { cdata = g_cdata_ascii; idx = cp - 32; }
+        else if (cp >= 0x0400 && cp < 0x0500) { cdata = g_cdata_cyrillic; idx = cp - 0x0400; }
+        else { cx += g_cell_w; continue; }
+        stbtt_aligned_quad q; float bx = cx, by = baseline_y;
         stbtt_GetPackedQuad(cdata, ATLAS_W, ATLAS_H, idx, &bx, &by, &q, 1);
-        glTexCoord2f(q.s0,q.t0); glVertex2f(q.x0,q.y0);
-        glTexCoord2f(q.s1,q.t0); glVertex2f(q.x1,q.y0);
-        glTexCoord2f(q.s1,q.t1); glVertex2f(q.x1,q.y1);
-        glTexCoord2f(q.s0,q.t1); glVertex2f(q.x0,q.y1);
+        glTexCoord2f(q.s0, q.t0); glVertex2f(q.x0, q.y0);
+        glTexCoord2f(q.s1, q.t0); glVertex2f(q.x1, q.y0);
+        glTexCoord2f(q.s1, q.t1); glVertex2f(q.x1, q.y1);
+        glTexCoord2f(q.s0, q.t1); glVertex2f(q.x0, q.y1);
         cx = bx;
     }
     glEnd();
@@ -173,649 +124,477 @@ static float string_width(const char* text) {
     const uint8_t* s = reinterpret_cast<const uint8_t*>(text);
     while (*s) {
         uint32_t cp;
-        if (*s < 0x80) { cp = *s++; }
+        if (*s < 0x80) cp = *s++;
         else if ((*s & 0xE0) == 0xC0) { cp = (*s++ & 0x1F) << 6; if (*s) cp |= (*s++ & 0x3F); }
         else if ((*s & 0xF0) == 0xE0) { cp = (*s++ & 0x0F) << 12; if (*s) cp |= (*s++ & 0x3F) << 6; if (*s) cp |= (*s++ & 0x3F); }
         else if ((*s & 0xF8) == 0xF0) { cp = (*s++ & 0x07) << 18; if (*s) cp |= (*s++ & 0x3F) << 12; if (*s) cp |= (*s++ & 0x3F) << 6; if (*s) cp |= (*s++ & 0x3F); }
-        else { cp = *s++; }
-        stbtt_packedchar* cdata = nullptr;
-        int idx = -1;
-        if (cp >= 32 && cp < 256) {
-            cdata = g_cdata_ascii; idx = cp - 32;
-        } else if (cp >= 0x0400 && cp < 0x0500) {
-            cdata = g_cdata_cyrillic; idx = cp - 0x0400;
-        } else {
-            cx += g_cell_w; continue;
-        }
+        else cp = *s++;
+        stbtt_packedchar* cdata = nullptr; int idx = -1;
+        if (cp >= 32 && cp < 256) { cdata = g_cdata_ascii; idx = cp - 32; }
+        else if (cp >= 0x0400 && cp < 0x0500) { cdata = g_cdata_cyrillic; idx = cp - 0x0400; }
+        else { cx += g_cell_w; continue; }
         stbtt_aligned_quad q;
         stbtt_GetPackedQuad(cdata, ATLAS_W, ATLAS_H, idx, &cx, &dummy, &q, 1);
     }
     return cx;
 }
 
-// Truncate UTF-8 string to fit within max_width pixels
-static std::string truncate_string(const char* text, float max_width) {
-    std::string result;
-    const uint8_t* p = (const uint8_t*)text;
-
-    while (*p && string_width(result.c_str()) < max_width) {
-        if (*p < 0x80) {
-            result += (char)*p++;
-        } else if ((*p & 0xE0) == 0xC0) {
-            result += (char)*p++;
-            if (*p) result += (char)*p++;
-        } else if ((*p & 0xF0) == 0xE0) {
-            result += (char)*p++;
-            if (*p) result += (char)*p++;
-            if (*p) result += (char)*p++;
-        } else if ((*p & 0xF8) == 0xF0) {
-            result += (char)*p++;
-            if (*p) result += (char)*p++;
-            if (*p) result += (char)*p++;
-            if (*p) result += (char)*p++;
-        } else {
-            result += (char)*p++;
-        }
-    }
-    return result;
+float term_draw_string(float x, float y, const char* t, float r, float g, float b, float a) {
+    return draw_string(x, y, t, r, g, b, a);
 }
+float term_string_width(const char* t) { return string_width(t); }
+float term_cell_h() { return g_cell_h; }
 
-// ─── HUD widget layout ────────────────────────────────────────────────────────
-// The docked ship (top-right) and mini-map (bottom-right) live in a fixed-width
-// column on the right edge. The terminal text area is shrunk to leave room.
-// Disabled automatically on narrow windows so the console never gets squeezed.
-struct HudLayout {
-    bool  enabled;
-    float col_x;      // left edge of the widget column
-    float col_w;      // widget width
-    float ship_y, ship_h;
-    float map_y,  map_h;
-};
-
-static HudLayout hud_layout(int W, int H) {
-    HudLayout L{};
-    const float COL_W = 232.0f;
-    const float MARGIN = 8.0f;
-    // Need enough width left over for a usable console, else turn the HUD off.
-    L.enabled = g_hud_widgets && (W >= 760) && (H >= 420);
-    if (!L.enabled) return L;
-
-    L.col_w = COL_W;
-    L.col_x = (float)W - COL_W - MARGIN;
-
-    float top = MARGIN;
-    float bottom = (float)H - MARGIN;
-    float gap = MARGIN;
-    // Ship gets a square-ish box on top; map fills the rest below it.
-    L.ship_y = top;
-    L.ship_h = COL_W * 0.92f;
-    L.map_y  = L.ship_y + L.ship_h + gap;
-    L.map_h  = bottom - L.map_y;
-    // If the window is short, give them an even split instead.
-    if (L.map_h < 140.0f) {
-        float total = bottom - top - gap;
-        L.ship_h = total * 0.5f;
-        L.map_y  = top + L.ship_h + gap;
-        L.map_h  = total * 0.5f;
-    }
-    return L;
-}
-
-// ─── Public font helpers (used by settings overlay) ───────────────────────────
-float term_draw_string(float x, float y, const char* text,
-                       float r, float g, float b, float a) {
-    return draw_string(x, y, text, r, g, b, a);
-}
-float term_string_width(const char* text) { return string_width(text); }
-float term_cell_h()                       { return g_cell_h; }
-
-// ─── Login screen layout ──────────────────────────────────────────────────────
-// Geometry shared between render_login and the mouse hit-testing so clicks line
-// up with what is drawn. Recomputed from the framebuffer size each use.
+// ─── Login screen (reused from v2) ────────────────────────────────────────────
 struct LoginLayout {
-    float fX, fW, fH;
-    float fY1, fY2;          // nick / pass field tops
-    float cbY;               // checkbox row top
-    float cb_login_x, cb_pass_x, cb_box;  // checkbox boxes
-    float bY, bW, bH;        // buttons
-    float b_login_x, b_reg_x;
+    float fX, fW, fH, fY1, fY2;
+    float bY, bW, bH, b_login_x, b_reg_x;
 };
-
 static LoginLayout login_layout(int W, int H) {
     LoginLayout L;
     float cx = W * 0.5f, cy = H * 0.5f;
     L.fW = 360.0f; L.fX = cx - L.fW * 0.5f; L.fH = 40.0f;
-    L.fY1 = cy - 68; L.fY2 = L.fY1 + 56;
-    L.cbY = L.fY2 + L.fH + 10.0f;
-    L.cb_box = 16.0f;
-    L.cb_login_x = L.fX;
-    L.cb_pass_x  = L.fX + L.fW * 0.5f;
-    L.bY = L.cbY + L.cb_box + 14.0f; L.bW = 170.0f; L.bH = 34.0f;
-    L.b_login_x = L.fX;
-    L.b_reg_x   = L.fX + L.fW - L.bW;
+    L.fY1 = cy - 60; L.fY2 = L.fY1 + 56;
+    L.bY = L.fY2 + L.fH + 18.0f; L.bW = 170.0f; L.bH = 34.0f;
+    L.b_login_x = L.fX; L.b_reg_x = L.fX + L.fW - L.bW;
     return L;
 }
-
 static bool in_rect(float mx, float my, float x, float y, float w, float h) {
     return mx >= x && mx <= x + w && my >= y && my <= y + h;
 }
 
-// Submits credentials (login or register). Shared by the Enter/F2 keys and the
-// on-screen buttons. Also persists remembered credentials per the checkboxes.
-static void login_submit(GLFWwindow* /*win*/, bool do_register) {
+static void login_submit(bool do_register) {
     if (g_field_nick.empty() || g_field_pass.empty()) return;
-    if (g_conn_status != ConnStatus::ONLINE) {
-        g_auth_error = "Server is offline. Connecting...";
-        return;
-    }
+    if (g_conn_status != ConnStatus::ONLINE) { g_auth_error = "Server is offline. Connecting..."; return; }
     if (do_register) {
-        // Quick local checks for registration (server re-validates anyway).
-        if (g_field_nick.size() < 4) {
-            g_auth_error = "Nickname must be at least 4 characters.";
-            return;
-        }
-        if (g_field_pass.size() < 5) {
-            g_auth_error = "Password must be at least 5 characters.";
-            return;
-        }
+        if (g_field_nick.size() < 4) { g_auth_error = "Nickname must be at least 4 characters."; return; }
+        if (g_field_pass.size() < 5) { g_auth_error = "Password must be at least 5 characters."; return; }
     }
-    // Persist remembered credentials before sending.
-    g_saved_login.nick = g_field_nick;
-    g_saved_login.pass = g_field_pass;
-    saved_login_save("login.cfg");
-
     g_auth_error.clear();
     net_send_login(g_field_nick, g_field_pass, do_register);
 }
 
-// ─── Login screen ─────────────────────────────────────────────────────────────
 static void render_login(int W, int H) {
     glClearColor(0.03f, 0.03f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    set_ortho(W, H);
     glDisable(GL_DEPTH_TEST);
-
+    set_ortho(W, H);
     float cx = W * 0.5f, cy = H * 0.5f;
 
-    // Background stars
     srand(0xDEAD1234);
-    glPointSize(1.5f); glColor3f(0.12f,0.15f,0.22f);
+    glPointSize(1.5f); glColor3f(0.12f, 0.15f, 0.22f);
     glBegin(GL_POINTS);
-    for (int i = 0; i < 200; ++i)
-        glVertex2f((float)(rand()%W), (float)(rand()%H));
+    for (int i = 0; i < 200; ++i) glVertex2f((float)(rand() % W), (float)(rand() % H));
     glEnd();
 
-    // Title
     const char* title = "HORIZON  PRIME";
-    float tw = string_width(title) * 1.0f;
-    // Glow layers
-    for (int d = 3; d >= 1; --d) {
-        float a = 0.04f * d;
-        draw_string(cx - tw*0.5f - d, cy - 130 - d, title, 0.2f*a, 0.4f*a, a, 0.6f);
-    }
-    draw_string(cx - tw*0.5f, cy - 130, title, 0.45f, 0.65f, 1.0f);
+    float tw = string_width(title);
+    draw_string(cx - tw * 0.5f, cy - 130, title, 0.45f, 0.65f, 1.0f);
+    const char* sub = "//  Deep Space Online  //";
+    draw_string(cx - string_width(sub) * 0.5f, cy - 104, sub, 0.25f, 0.30f, 0.55f);
 
-    // Subtitle
-    const char* sub = "//  Terminal Interface  //";
-    draw_string(cx - string_width(sub)*0.5f, cy - 104, sub, 0.25f, 0.30f, 0.55f);
-
-    // Separator
-    glColor4f(0.15f,0.18f,0.45f,0.8f); glLineWidth(1.0f);
-    glBegin(GL_LINES);
-        glVertex2f(cx-220, cy-82); glVertex2f(cx+220, cy-82);
-    glEnd();
-
-    // Fields
     LoginLayout L = login_layout(W, H);
-    float fX = L.fX, fW = L.fW, fH = L.fH, fY1 = L.fY1, fY2 = L.fY2;
-
     bool nf = (g_focused_login == 0), pf = (g_focused_login == 1);
 
-    // Nick field
-    draw_rect(fX, fY1, fW, fH, 0.05f,0.05f,0.12f);
-    glColor4f(nf?0.35f:0.15f, nf?0.50f:0.18f, nf?1.0f:0.40f, 1.0f);
-    glLineWidth(nf?1.8f:1.0f);
-    glBegin(GL_LINE_LOOP);
-        glVertex2f(fX,fY1); glVertex2f(fX+fW,fY1);
-        glVertex2f(fX+fW,fY1+fH); glVertex2f(fX,fY1+fH);
-    glEnd();
-    draw_string(fX+10, fY1+8, "Nickname:", 0.30f,0.40f,0.70f);
+    draw_rect(L.fX, L.fY1, L.fW, L.fH, 0.05f, 0.05f, 0.12f);
+    draw_string(L.fX + 10, L.fY1 + 8, "Nickname:", 0.30f, 0.40f, 0.70f);
     std::string nd = g_field_nick + (nf ? "_" : "");
-    draw_string(fX+120, fY1+8, nd.c_str(), 0.85f,0.92f,1.0f);
+    draw_string(L.fX + 120, L.fY1 + 8, nd.c_str(), 0.85f, 0.92f, 1.0f);
 
-    // Pass field
-    draw_rect(fX, fY2, fW, fH, 0.05f,0.05f,0.12f);
-    glColor4f(pf?0.35f:0.15f, pf?0.50f:0.18f, pf?1.0f:0.40f, 1.0f);
-    glLineWidth(pf?1.8f:1.0f);
-    glBegin(GL_LINE_LOOP);
-        glVertex2f(fX,fY2); glVertex2f(fX+fW,fY2);
-        glVertex2f(fX+fW,fY2+fH); glVertex2f(fX,fY2+fH);
-    glEnd();
-    draw_string(fX+10, fY2+8, "Password:", 0.30f,0.40f,0.70f);
-    std::string pd = std::string(g_field_pass.size(),'*') + (pf ? "_" : "");
-    draw_string(fX+120, fY2+8, pd.c_str(), 0.85f,0.92f,1.0f);
+    draw_rect(L.fX, L.fY2, L.fW, L.fH, 0.05f, 0.05f, 0.12f);
+    draw_string(L.fX + 10, L.fY2 + 8, "Password:", 0.30f, 0.40f, 0.70f);
+    std::string pd = std::string(g_field_pass.size(), '*') + (pf ? "_" : "");
+    draw_string(L.fX + 120, L.fY2 + 8, pd.c_str(), 0.85f, 0.92f, 1.0f);
 
-    // ── Remember checkboxes ───────────────────────────────────────────────────
-    bool ru = (g_settings.language == 1);
-    auto draw_checkbox = [&](float bx, float by, bool checked, const char* label) {
-        draw_rect(bx, by, L.cb_box, L.cb_box, 0.05f,0.05f,0.12f);
-        glColor3f(0.25f,0.35f,0.70f); glLineWidth(1.2f);
-        glBegin(GL_LINE_LOOP);
-            glVertex2f(bx, by); glVertex2f(bx+L.cb_box, by);
-            glVertex2f(bx+L.cb_box, by+L.cb_box); glVertex2f(bx, by+L.cb_box);
-        glEnd();
-        if (checked) {
-            glColor3f(0.30f,0.85f,0.45f); glLineWidth(2.0f);
-            glBegin(GL_LINES);
-                glVertex2f(bx+3, by+L.cb_box*0.55f); glVertex2f(bx+L.cb_box*0.45f, by+L.cb_box-3);
-                glVertex2f(bx+L.cb_box*0.45f, by+L.cb_box-3); glVertex2f(bx+L.cb_box-3, by+3);
-            glEnd();
-        }
-        draw_string(bx + L.cb_box + 6, by - 1, label, 0.55f,0.62f,0.80f);
-    };
-    draw_checkbox(L.cb_login_x, L.cbY, g_settings.remember_login,
-                  ru ? "запомнить логин"  : "remember login");
-    draw_checkbox(L.cb_pass_x,  L.cbY, g_settings.remember_pass,
-                  ru ? "запомнить пароль" : "remember password");
-
-    // Buttons
-    float bY = L.bY, bW = L.bW;
-    draw_rect(L.b_login_x, bY, bW, L.bH, 0.04f,0.18f,0.06f);
-    glColor3f(0.15f,0.65f,0.20f); glLineWidth(1.2f);
-    glBegin(GL_LINE_LOOP);
-        glVertex2f(L.b_login_x,bY); glVertex2f(L.b_login_x+bW,bY);
-        glVertex2f(L.b_login_x+bW,bY+L.bH); glVertex2f(L.b_login_x,bY+L.bH);
-    glEnd();
-    draw_string(L.b_login_x+12, bY+8, "Enter  - Login", 0.25f,0.90f,0.30f);
-
-    float b2x = L.b_reg_x;
-    draw_rect(b2x, bY, bW, L.bH, 0.04f,0.05f,0.20f);
-    glColor3f(0.15f,0.20f,0.65f); glLineWidth(1.2f);
-    glBegin(GL_LINE_LOOP);
-        glVertex2f(b2x,bY); glVertex2f(b2x+bW,bY);
-        glVertex2f(b2x+bW,bY+L.bH); glVertex2f(b2x,bY+L.bH);
-    glEnd();
-    draw_string(b2x+12, bY+8, "F2  - Register", 0.35f,0.40f,0.90f);
+    draw_rect(L.b_login_x, L.bY, L.bW, L.bH, 0.04f, 0.18f, 0.06f);
+    draw_string(L.b_login_x + 12, L.bY + 8, "Enter  - Login", 0.25f, 0.90f, 0.30f);
+    draw_rect(L.b_reg_x, L.bY, L.bW, L.bH, 0.04f, 0.05f, 0.20f);
+    draw_string(L.b_reg_x + 12, L.bY + 8, "F2  - Register", 0.35f, 0.40f, 0.90f);
 
     const char* hint = "Tab - switch field     Esc - quit";
-    draw_string(cx - string_width(hint)*0.5f, bY+50, hint, 0.22f,0.25f,0.45f);
+    draw_string(cx - string_width(hint) * 0.5f, L.bY + 50, hint, 0.22f, 0.25f, 0.45f);
 
     if (!g_auth_error.empty()) {
-        float ew = std::max(fW, string_width(g_auth_error.c_str())+28);
-        float ex = cx - ew*0.5f;
-        draw_rect(ex, bY+72, ew, 32, 0.22f,0.04f,0.04f);
-        glColor3f(0.80f,0.20f,0.20f); glLineWidth(1.2f);
-        glBegin(GL_LINE_LOOP);
-            glVertex2f(ex,bY+72); glVertex2f(ex+ew,bY+72);
-            glVertex2f(ex+ew,bY+104); glVertex2f(ex,bY+104);
-        glEnd();
-        draw_string(ex+12, bY+80, g_auth_error.c_str(), 1.0f,0.35f,0.35f);
+        float ew = std::max(L.fW, string_width(g_auth_error.c_str()) + 28);
+        float ex = cx - ew * 0.5f;
+        draw_rect(ex, L.bY + 72, ew, 32, 0.22f, 0.04f, 0.04f);
+        draw_string(ex + 12, L.bY + 80, g_auth_error.c_str(), 1.0f, 0.35f, 0.35f);
     }
 
-    // Server status bar at the bottom
-    {
-        ConnStatus cs  = g_conn_status.load();
-        int        cnt = g_online_count.load();
-
-        float dot_r, dot_g, dot_b;
-        const char* status_text;
-        char online_buf[48] = {};
-
-        if (cs == ConnStatus::ONLINE) {
-            dot_r = 0.20f; dot_g = 0.85f; dot_b = 0.30f;
-            std::snprintf(online_buf, sizeof(online_buf), "  Online: %d", cnt);
-            status_text = online_buf;
-        } else if (cs == ConnStatus::CONNECTING) {
-            dot_r = 0.85f; dot_g = 0.75f; dot_b = 0.10f;
-            status_text = "  Connecting...";
-        } else {
-            dot_r = 0.85f; dot_g = 0.20f; dot_b = 0.20f;
-            status_text = "  Server offline";
-        }
-
-        float sy = (float)H - 26.0f;
-        // Dot (filled circle approximation via point)
-        glPointSize(10.0f);
-        glColor3f(dot_r, dot_g, dot_b);
-        glBegin(GL_POINTS); glVertex2f(14.0f, sy + 8.0f); glEnd();
-        draw_string(22.0f, sy, status_text, dot_r * 0.8f, dot_g * 0.8f, dot_b * 0.8f);
-    }
+    ConnStatus cs = g_conn_status.load();
+    float dr, dg, db; const char* st; char buf[48] = {};
+    if (cs == ConnStatus::ONLINE)     { dr=0.2f; dg=0.85f; db=0.3f; std::snprintf(buf,sizeof(buf),"  Online: %d", g_online_count.load()); st=buf; }
+    else if (cs == ConnStatus::CONNECTING) { dr=0.85f; dg=0.75f; db=0.1f; st="  Connecting..."; }
+    else                              { dr=0.85f; dg=0.2f; db=0.2f; st="  Server offline"; }
+    float sy = (float)H - 26.0f;
+    glPointSize(10.0f); glColor3f(dr, dg, db);
+    glBegin(GL_POINTS); glVertex2f(14.0f, sy + 8.0f); glEnd();
+    draw_string(22.0f, sy, st, dr * 0.8f, dg * 0.8f, db * 0.8f);
 }
 
-// ─── Scene: starfield ─────────────────────────────────────────────────────────
-static void render_scene_starfield(int W, int H, float t) {
-    glClearColor(0.0f,0.0f,0.0f,1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    set_ortho(W, H);
-    float cx = W*0.5f, cy = H*0.5f;
-    srand(0xBEEF);
-    glPointSize(2.0f);
-    glBegin(GL_POINTS);
-    for (int i = 0; i < 300; ++i) {
-        float angle = (float)(rand()%6283)*0.001f;
-        float base_r = 20.0f + (rand()%300);
-        float speed  = 1.0f + (float)(rand()%40)*0.1f;
-        float r2 = base_r + std::fmod(t * speed * 30.0f, (float)(W));
-        float x = cx + std::cos(angle) * r2;
-        float y = cy + std::sin(angle) * r2;
-        float br = std::min(1.0f, (r2 - base_r) / 300.0f);
-        glColor4f(br*0.8f, br*0.9f, br, br);
-        glVertex2f(x, y);
+// ─── 3D world ─────────────────────────────────────────────────────────────────
+// Tile (tx, ty) maps to world (x = tx, y = 0, z = ty). The camera orbits the
+// player, angled down like OSRS. Movement between tiles is interpolated.
+static float g_cam_yaw   = 0.7f;     // radians, rotatable
+static float g_cam_dist  = 16.0f;    // zoom
+static const float CAM_PITCH = 0.95f; // fixed downward tilt (radians from horizontal)
+static int   g_mouse_x = 0, g_mouse_y = 0;
+static bool  g_rotating = false;
+static double g_rot_last_x = 0;
+
+// Where the player's render position is (for camera target). Updated each frame.
+static float g_focus_x = 4.0f, g_focus_z = 4.0f;
+
+// 4x4 matrices, column-major (OpenGL style). Minimal helpers.
+static void mat_identity(float* m) { for (int i=0;i<16;i++) m[i]=(i%5==0)?1.f:0.f; }
+static void mat_mul(const float* a, const float* b, float* out) {
+    float r[16];
+    for (int c=0;c<4;c++) for (int row=0;row<4;row++) {
+        r[c*4+row] = a[0*4+row]*b[c*4+0] + a[1*4+row]*b[c*4+1]
+                   + a[2*4+row]*b[c*4+2] + a[3*4+row]*b[c*4+3];
     }
+    std::memcpy(out, r, sizeof(r));
+}
+static void mat_perspective(float* m, float fovy, float aspect, float zn, float zf) {
+    float fH = std::tan(fovy * 0.5f * PI / 180.0f) * zn;
+    float fW = fH * aspect;
+    mat_identity(m);
+    m[0]=zn/fW; m[5]=zn/fH;
+    m[10]=-(zf+zn)/(zf-zn); m[11]=-1.f;
+    m[14]=-(2.f*zf*zn)/(zf-zn); m[15]=0.f;
+}
+// Camera eye position from orbit params, looking at (tx,0,tz).
+static void compute_eye(float tx, float tz, float* ex, float* ey, float* ez) {
+    float horiz = std::cos(CAM_PITCH) * g_cam_dist;
+    *ex = tx + std::sin(g_cam_yaw) * horiz;
+    *ez = tz + std::cos(g_cam_yaw) * horiz;
+    *ey = std::sin(CAM_PITCH) * g_cam_dist;
+}
+static void mat_lookat(float* m, float ex,float ey,float ez, float cx,float cy,float cz) {
+    float fx=cx-ex, fy=cy-ey, fz=cz-ez;
+    float fl=std::sqrt(fx*fx+fy*fy+fz*fz); fx/=fl; fy/=fl; fz/=fl;
+    float ux=0,uy=1,uz=0;
+    float sx=fy*uz-fz*uy, sy=fz*ux-fx*uz, sz=fx*uy-fy*ux;
+    float sl=std::sqrt(sx*sx+sy*sy+sz*sz); sx/=sl; sy/=sl; sz/=sl;
+    float ux2=sy*fz-sz*fy, uy2=sz*fx-sx*fz, uz2=sx*fy-sy*fx;
+    mat_identity(m);
+    m[0]=sx; m[4]=sy; m[8]=sz;
+    m[1]=ux2; m[5]=uy2; m[9]=uz2;
+    m[2]=-fx; m[6]=-fy; m[10]=-fz;
+    m[12]=-(sx*ex+sy*ey+sz*ez);
+    m[13]=-(ux2*ex+uy2*ey+uz2*ez);
+    m[14]=(fx*ex+fy*ey+fz*ez);
+}
+
+// Store the last view/proj for click picking.
+static float g_view[16], g_proj[16];
+static int   g_vp_w = 1, g_vp_h = 1;
+
+// Draw a box centred at (x,z), base on the ground, of given half-size and height.
+static void draw_box(float x, float z, float half, float height,
+                     float r, float g, float b) {
+    float x0=x-half, x1=x+half, z0=z-half, z1=z+half, y0=0.0f, y1=height;
+    glDisable(GL_TEXTURE_2D);
+    glBegin(GL_QUADS);
+    // top
+    glColor3f(r, g, b);
+    glVertex3f(x0,y1,z0); glVertex3f(x1,y1,z0); glVertex3f(x1,y1,z1); glVertex3f(x0,y1,z1);
+    // sides (slightly shaded)
+    glColor3f(r*0.8f, g*0.8f, b*0.8f);
+    glVertex3f(x0,y0,z1); glVertex3f(x1,y0,z1); glVertex3f(x1,y1,z1); glVertex3f(x0,y1,z1);
+    glVertex3f(x1,y0,z0); glVertex3f(x0,y0,z0); glVertex3f(x0,y1,z0); glVertex3f(x1,y1,z0);
+    glColor3f(r*0.65f, g*0.65f, b*0.65f);
+    glVertex3f(x0,y0,z0); glVertex3f(x0,y0,z1); glVertex3f(x0,y1,z1); glVertex3f(x0,y1,z0);
+    glVertex3f(x1,y0,z1); glVertex3f(x1,y0,z0); glVertex3f(x1,y1,z0); glVertex3f(x1,y1,z1);
     glEnd();
-    // Center glow
-    glPointSize(40.0f); glColor4f(0.15f,0.25f,0.60f,0.25f);
-    glBegin(GL_POINTS); glVertex2f(cx,cy); glEnd();
-    glPointSize(12.0f); glColor4f(0.40f,0.60f,1.0f,0.50f);
-    glBegin(GL_POINTS); glVertex2f(cx,cy); glEnd();
 }
 
-static void render_scene_warp(int W, int H, float t) {
-    glClearColor(0.0f,0.0f,0.02f,1.0f);
+// Unproject a screen click onto the ground plane (y=0). Returns tile or {-1,-1}.
+static void screen_to_tile(double mx, double my, int W, int H, int& out_tx, int& out_ty) {
+    out_tx = out_ty = -1;
+    // NDC
+    float nx = (float)(2.0 * mx / W - 1.0);
+    float ny = (float)(1.0 - 2.0 * my / H);
+    // Inverse of proj*view applied to two points (near/far) — but we can build a
+    // ray from the camera eye through the clicked direction more simply.
+    float invVP[16], vp[16];
+    mat_mul(g_proj, g_view, vp);
+    // Invert vp (general 4x4 inverse).
+    auto inv4 = [](const float* m, float* o)->bool {
+        float inv[16], det;
+        inv[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+        inv[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+        inv[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+        inv[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+        inv[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+        inv[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+        inv[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+        inv[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+        inv[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+        inv[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+        inv[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+        inv[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+        inv[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+        inv[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+        inv[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+        inv[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+        det=m[0]*inv[0]+m[1]*inv[4]+m[2]*inv[8]+m[3]*inv[12];
+        if (std::fabs(det)<1e-9f) return false;
+        det=1.0f/det; for(int i=0;i<16;i++) o[i]=inv[i]*det; return true;
+    };
+    if (!inv4(vp, invVP)) return;
+    auto unproject = [&](float z, float& wx, float& wy, float& wz) {
+        float ix=invVP[0]*nx+invVP[4]*ny+invVP[8]*z+invVP[12];
+        float iy=invVP[1]*nx+invVP[5]*ny+invVP[9]*z+invVP[13];
+        float iz=invVP[2]*nx+invVP[6]*ny+invVP[10]*z+invVP[14];
+        float iw=invVP[3]*nx+invVP[7]*ny+invVP[11]*z+invVP[15];
+        if (std::fabs(iw)<1e-9f) iw=1; wx=ix/iw; wy=iy/iw; wz=iz/iw;
+    };
+    float ax,ay,az, bx,by,bz;
+    unproject(-1.0f, ax,ay,az);   // near
+    unproject( 1.0f, bx,by,bz);   // far
+    float dy = by - ay;
+    if (std::fabs(dy) < 1e-6f) return;
+    float t = -ay / dy;           // intersect y=0
+    if (t < 0) return;
+    float hx = ax + (bx-ax)*t;
+    float hz = az + (bz-az)*t;
+    int tx = (int)std::floor(hx + 0.5f);
+    int ty = (int)std::floor(hz + 0.5f);
+    if (tx < 0 || ty < 0 || tx >= g_sector.tiles_x || ty >= g_sector.tiles_y) return;
+    out_tx = tx; out_ty = ty;
+}
+
+// Cockpit panel shown when seated in the ship.
+static void render_cockpit(int W, int H) {
+    glClearColor(0.02f, 0.03f, 0.05f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    set_ortho(W, H);
-    float cx = W*0.5f, cy = H*0.5f;
-    srand(0xCAFE);
-    glLineWidth(1.0f);
-    glBegin(GL_LINES);
-    for (int i = 0; i < 200; ++i) {
-        float angle = (float)(rand()%6283)*0.001f;
-        float r1 = 10.0f + (float)(rand()%50);
-        float len = 20.0f + std::fmod(t*200.0f, 400.0f);
-        float r2 = r1 + len;
-        float br = std::min(1.0f, len/200.0f);
-        glColor4f(br*0.6f, br*0.8f, br, br*0.9f);
-        glVertex2f(cx + std::cos(angle)*r1, cy + std::sin(angle)*r1);
-        glVertex2f(cx + std::cos(angle)*r2, cy + std::sin(angle)*r2);
-    }
-    glEnd();
-}
-
-static void render_scene(int W, int H, float dt) {
-    static float scene_time = 0.0f;
-    scene_time += dt;
-    uint8_t sid;
-    float time_left;
-    {
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        sid       = g_scene.scene_id;
-        time_left = g_scene.time_left;
-        if (time_left > 0.0f) {
-            g_scene.time_left -= dt;
-            if (g_scene.time_left <= 0.0f) {
-                g_scene.active = false;
-                scene_time = 0.0f;
-                return;
-            }
-        }
-    }
-    switch (sid) {
-    case 0: render_scene_starfield(W, H, scene_time); break;
-    case 1: render_scene_warp(W, H, scene_time);      break;
-    default:
-        glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
-    }
-}
-
-// ─── Terminal screen ──────────────────────────────────────────────────────────
-static int  g_scroll_offset = 0;  // lines scrolled up from bottom
-
-// ─── Command history (up/down arrows) ────────────────────────────────────────
-static std::vector<std::string> g_cmd_history;
-static int                      g_history_idx = -1;  // -1 = current input
-static std::string              g_history_saved;     // saved current input while browsing
-static bool                     g_input_selection_all = false;  // for Ctrl+A visual state
-
-static void render_terminal(int W, int H, float dt) {
-    (void)dt;
-    glClearColor(0.02f,0.02f,0.05f,1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    set_ortho(W, H);
     glDisable(GL_DEPTH_TEST);
+    set_ortho(W, H);
 
-    // Layout
-    const float PAD_L   = 12.0f;
-    HudLayout   hud     = hud_layout(W, H);
-    // Reserve the right column for HUD widgets so text never runs underneath.
-    const float PAD_R   = hud.enabled ? ((float)W - hud.col_x + 12.0f) : 12.0f;
-    const float INPUT_H = g_cell_h + 14.0f;
-    const float PROMPT_Y = (float)H - INPUT_H + 6.0f;
-    const float TEXT_AREA_H = (float)H - INPUT_H - 6.0f;
-
-    // Background
-    draw_rect(0,0,(float)W,(float)H, 0.015f,0.015f,0.04f);
-
-    // Scanline effect (controlled by settings)
-    if (g_settings.scanlines) {
-        float sc_alpha = (g_settings.scanline_bright / 10.0f) * 0.12f;
-        glColor4f(0.0f, 0.0f, 0.0f, sc_alpha);
-        glBegin(GL_LINES);
-        for (float ly = 0; ly < H; ly += 3.0f) {
-            glVertex2f(0, ly); glVertex2f((float)W, ly);
-        }
-        glEnd();
-    }
-
-    // ── Text lines ────────────────────────────────────────────────────────────
-    int lines_visible = (int)(TEXT_AREA_H / g_cell_h);
-
-    std::vector<TermLine> lines_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        lines_snapshot = g_lines;
-    }
-
-    int total = (int)lines_snapshot.size();
-    int start_idx = std::max(0, total - lines_visible - g_scroll_offset);
-    int end_idx   = std::max(0, total - g_scroll_offset);
-
-    float ty = TEXT_AREA_H - g_cell_h * (end_idx - start_idx);
-    for (int i = start_idx; i < end_idx; ++i) {
-        const auto& ln = lines_snapshot[i];
-        float r = ln.r / 255.0f;
-        float g = ln.g / 255.0f;
-        float b = ln.b / 255.0f;
-        float a = (ln.flags & 0x02) ? 0.55f : 1.0f;  // dim flag
-        float max_text_width = (float)W - PAD_L - PAD_R;
-        std::string truncated = truncate_string(ln.text.c_str(), max_text_width);
-        draw_string(PAD_L, ty, truncated.c_str(), r, g, b, a);
-        ty += g_cell_h;
-    }
-    (void)PAD_R;
-
-    // Scroll indicator
-    if (g_scroll_offset > 0) {
-        char sc[32]; std::snprintf(sc, sizeof(sc), "  ^ %d lines up", g_scroll_offset);
-        draw_string(PAD_L, 6, sc, 0.35f,0.40f,0.65f);
-    }
-
-    // ── Input line ────────────────────────────────────────────────────────────
-    // Separator
-    glColor4f(0.12f,0.14f,0.40f,0.90f); glLineWidth(1.0f);
-    glBegin(GL_LINES);
-        glVertex2f(0, (float)H - INPUT_H);
-        glVertex2f((float)W, (float)H - INPUT_H);
+    // Viewport "window" looking at stars.
+    float vx = 40, vy = 40, vw = W - 80, vh = H * 0.45f;
+    draw_rect(vx, vy, vw, vh, 0.01f, 0.01f, 0.03f);
+    srand(0xBEEF77);
+    glPointSize(1.6f); glColor3f(0.7f, 0.8f, 1.0f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < 260; ++i)
+        glVertex2f(vx + rand() % (int)vw, vy + rand() % (int)vh);
+    glEnd();
+    // Frame
+    glColor3f(0.25f, 0.45f, 0.7f); glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(vx,vy); glVertex2f(vx+vw,vy); glVertex2f(vx+vw,vy+vh); glVertex2f(vx,vy+vh);
     glEnd();
 
-    draw_rect(0, (float)H - INPUT_H, (float)W, INPUT_H, 0.02f,0.02f,0.07f);
+    // Dashboard
+    float dy = vy + vh + 20;
+    draw_rect(vx, dy, vw, H - dy - 40, 0.06f, 0.07f, 0.10f);
+    glColor3f(0.20f, 0.30f, 0.45f); glLineWidth(1.5f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(vx,dy); glVertex2f(vx+vw,dy); glVertex2f(vx+vw,H-40); glVertex2f(vx,H-40);
+    glEnd();
 
-    // Prompt
-    std::string prompt;
-    std::string input;
+    draw_string(vx + 16, dy + 14, "С: CONTROL PANEL — STARSHIP", 0.55f, 0.80f, 1.0f);
+    char sec[96];
+    std::snprintf(sec, sizeof(sec), "  Sector [%d,%d,%d]   Star: %s (%c)",
+        g_sector.sector_x, g_sector.sector_y, g_sector.sector_z,
+        g_sector.star_name.c_str(), g_sector.star_class);
+    draw_string(vx + 16, dy + 40, sec, 0.70f, 0.85f, 0.75f);
+    draw_string(vx + 16, dy + 64, "  Hull 100%   Shield 100%   Fuel 100%   (flight not yet implemented)",
+                0.55f, 0.70f, 0.60f);
+
+    // Ship terminal lines
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
-        prompt = g_prompt;
-        input  = g_input_buf;
+        float ty = dy + 96;
+        int start = std::max(0, (int)g_term.size() - 8);
+        for (int i = start; i < (int)g_term.size(); ++i) {
+            auto& l = g_term[i];
+            draw_string(vx + 16, ty, l.text.c_str(), l.r/255.f, l.g/255.f, l.b/255.f);
+            ty += g_cell_h;
+        }
+        // Input line
+        if (g_term_open) {
+            std::string in = "  :: " + g_input_buf + "_";
+            draw_string(vx + 16, H - 64, in.c_str(), 0.7f, 0.9f, 0.7f);
+        }
     }
-    float prompt_x = draw_string(PAD_L, PROMPT_Y, prompt.c_str(), 0.35f,0.55f,1.0f);
 
-    // Cursor blink
-    double blink = std::fmod(glfwGetTime(), 1.0);
-    std::string display = input + (blink < 0.55 ? "_" : " ");
-    float max_input_width = (float)W - prompt_x - PAD_R;
-    std::string truncated_input = truncate_string(display.c_str(), max_input_width);
-    draw_string(prompt_x, PROMPT_Y, truncated_input.c_str(), 0.85f,0.92f,1.0f);
+    const char* hint = "Space - exit ship    Enter - ship terminal    Esc - quit";
+    draw_string(vx + 16, H - 40 + 6, hint, 0.35f, 0.45f, 0.60f);
 }
 
-// ─── Chat overlay panel ───────────────────────────────────────────────────────
-static double g_chat_uptime = 0.0;  // updated each frame from glfwGetTime
+static void render_world(int W, int H, float dt) {
+    glClearColor(0.01f, 0.02f, 0.04f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
 
-static void render_chat_overlay(int W, int H) {
-    const int   VISIBLE = 6;
-    const float FADE_START = 5.0f;   // seconds before fade starts
-    const float FADE_END   = 8.0f;   // fully faded
-    const float PAD = 10.0f;
-    const float LINE_H = g_cell_h;
-
-    std::vector<ChatLine> snap;
+    // Update interpolated render positions and find the player's focus point.
     {
         std::lock_guard<std::mutex> lock(g_state_mutex);
-        snap = g_chat_lines;
+        float lerp = std::min(1.0f, dt * 8.0f);
+        for (auto& [id, e] : g_entities) {
+            e.rx += ((float)e.tile_x - e.rx) * lerp;
+            e.ry += ((float)e.tile_y - e.ry) * lerp;
+            if (id == g_player_id) { g_focus_x = e.rx; g_focus_z = e.ry; }
+        }
     }
-    if (snap.empty()) return;
 
-    // Take last VISIBLE lines
-    int start = std::max(0, (int)snap.size() - VISIBLE);
-    int count = (int)snap.size() - start;
+    // Projection + view
+    mat_perspective(g_proj, 50.0f, (float)W / (float)H, 0.1f, 200.0f);
+    float ex, ey, ez;
+    compute_eye(g_focus_x, g_focus_z, &ex, &ey, &ez);
+    mat_lookat(g_view, ex, ey, ez, g_focus_x, 0.0f, g_focus_z);
+    g_vp_w = W; g_vp_h = H;
 
-    // Bottom of chat panel sits just above the input separator
-    const float INPUT_H = g_cell_h + 14.0f;
-    float base_y = (float)H - INPUT_H - PAD - LINE_H;
+    glViewport(0, 0, W, H);
+    glMatrixMode(GL_PROJECTION); glLoadMatrixf(g_proj);
+    glMatrixMode(GL_MODELVIEW);  glLoadMatrixf(g_view);
 
-    for (int i = count - 1; i >= 0; --i) {
-        const auto& cl = snap[start + i];
-        float age = (float)(g_chat_uptime - cl.timestamp);
-        if (age > FADE_END) continue;
+    int TX = g_sector.tiles_x, TY = g_sector.tiles_y;
 
-        float alpha = 1.0f;
-        if (age > FADE_START)
-            alpha = 1.0f - (age - FADE_START) / (FADE_END - FADE_START);
-        alpha = std::max(0.0f, std::min(1.0f, alpha));
+    // Ground grid (checker tiles).
+    glDisable(GL_TEXTURE_2D);
+    glBegin(GL_QUADS);
+    for (int ty = 0; ty < TY; ++ty)
+        for (int tx = 0; tx < TX; ++tx) {
+            bool dark = ((tx + ty) & 1);
+            if (dark) glColor3f(0.10f, 0.12f, 0.16f);
+            else      glColor3f(0.13f, 0.16f, 0.21f);
+            float x0=tx-0.5f, x1=tx+0.5f, z0=ty-0.5f, z1=ty+0.5f;
+            glVertex3f(x0,0,z0); glVertex3f(x1,0,z0); glVertex3f(x1,0,z1); glVertex3f(x0,0,z1);
+        }
+    glEnd();
+    // Grid lines
+    glColor3f(0.20f, 0.28f, 0.38f); glLineWidth(1.0f);
+    glBegin(GL_LINES);
+    for (int i = 0; i <= TX; ++i) { glVertex3f(i-0.5f,0.01f,-0.5f); glVertex3f(i-0.5f,0.01f,TY-0.5f); }
+    for (int j = 0; j <= TY; ++j) { glVertex3f(-0.5f,0.01f,j-0.5f); glVertex3f(TX-0.5f,0.01f,j-0.5f); }
+    glEnd();
 
-        float y = base_y - (float)(count - 1 - i) * LINE_H;
+    // The ship (bigger box) at its tile.
+    draw_box((float)g_sector.ship_tile_x, (float)g_sector.ship_tile_y, 0.9f, 1.4f,
+             0.55f, 0.60f, 0.72f);
 
-        // Semi-transparent background per line
-        float tw = string_width(cl.text.c_str()) + 8.0f;
-        draw_rect(PAD - 4.0f, y - 2.0f, tw, LINE_H,
-                  0.0f, 0.0f, 0.0f, alpha * 0.45f);
+    // Players (boxes). Self is highlighted.
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        for (auto& [id, e] : g_entities) {
+            if (e.riding) continue;  // hidden — they're inside the ship
+            if (id == g_player_id) draw_box(e.rx, e.ry, 0.30f, 0.9f, 0.30f, 0.85f, 0.45f);
+            else                   draw_box(e.rx, e.ry, 0.30f, 0.9f, 0.75f, 0.55f, 0.35f);
+        }
+    }
 
-        draw_string(PAD, y, cl.text.c_str(),
-                    cl.r / 255.0f, cl.g / 255.0f, cl.b / 255.0f, alpha);
+    // ── 2D overlay (HUD + chat + nameplates) ───────────────────────────────────
+    glDisable(GL_DEPTH_TEST);
+    set_ortho(W, H);
+
+    // HUD
+    char hud[128];
+    std::snprintf(hud, sizeof(hud), "Sector [%d,%d,%d]  Star %s (%c)  Pilots: %d",
+        g_sector.sector_x, g_sector.sector_y, g_sector.sector_z,
+        g_sector.star_name.c_str(), g_sector.star_class, g_online_count.load());
+    draw_rect(8, 8, string_width(hud) + 20, 26, 0.0f, 0.0f, 0.0f, 0.5f);
+    draw_string(16, 12, hud, 0.7f, 0.85f, 1.0f);
+
+    const char* hint = "ЛКМ - идти   ПКМ по кораблю - сесть   ←→ - камера   колесо - зум   Esc - меню";
+    draw_string(16, H - 28, hint, 0.45f, 0.55f, 0.70f);
+
+    // Chat (bottom-left, fades after 8s)
+    {
+        std::lock_guard<std::mutex> lock(g_state_mutex);
+        double now = glfwGetTime();
+        float yy = H - 60;
+        for (int i = (int)g_chat_lines.size() - 1; i >= 0 && yy > H * 0.5f; --i) {
+            auto& c = g_chat_lines[i];
+            double age = now - c.timestamp;
+            if (age > 8.0) continue;
+            float a = age > 6.0 ? (float)(1.0 - (age - 6.0) / 2.0) : 1.0f;
+            draw_string(16, yy, c.text.c_str(), c.r/255.f, c.g/255.f, c.b/255.f, a);
+            yy -= g_cell_h;
+        }
     }
 }
 
-// ─── Main render entry ────────────────────────────────────────────────────────
-void terminal_render(int W, int H, float dt) {
-    g_chat_uptime = glfwGetTime();
+// ─── ESC pause menu ───────────────────────────────────────────────────────────
+// Three stacked buttons centred on screen: Settings / Leave to menu / Quit.
+struct PauseLayout {
+    float bx, bw, bh;
+    float by[3];   // tops of the three buttons
+};
+static PauseLayout pause_layout(int W, int H) {
+    PauseLayout L;
+    L.bw = 280.0f; L.bh = 46.0f;
+    L.bx = W * 0.5f - L.bw * 0.5f;
+    float gap = 14.0f;
+    float total = 3 * L.bh + 2 * gap;
+    float top = H * 0.5f - total * 0.5f + 20.0f;
+    for (int i = 0; i < 3; ++i) L.by[i] = top + i * (L.bh + gap);
+    return L;
+}
 
+static void render_pause_menu(int W, int H) {
+    // Dim the world behind the menu.
+    set_ortho(W, H);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    draw_rect(0, 0, (float)W, (float)H, 0.0f, 0.0f, 0.0f, 0.55f);
 
-    bool scene_active;
-    { std::lock_guard<std::mutex> lock(g_state_mutex); scene_active = g_scene.active; }
+    const char* title = "ПАУЗА";
+    draw_string(W * 0.5f - string_width(title) * 0.5f, H * 0.5f - 130, title, 0.7f, 0.85f, 1.0f);
 
-    if (g_screen == Screen::LOGIN) {
-        render_login(W, H);
-    } else if (scene_active) {
-        render_scene(W, H, dt);
-    } else if (g_map_open) {
-        // The galaxy map is a full-screen "camera". Don't draw the terminal or
-        // chat underneath it — otherwise server text keeps showing through and
-        // looks like garbage behind the map.
-        glClearColor(0.01f, 0.01f, 0.03f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-    } else {
-        render_terminal(W, H, dt);
-
-        // Docked HUD widgets (ship + mini-map) on the right column. Drawn on top
-        // of the terminal; the text area was already shrunk to leave room.
-        HudLayout hud = hud_layout(W, H);
-        if (hud.enabled) {
-            set_ortho(W, H);
-            glDisable(GL_DEPTH_TEST);
-            ship_widget_render(hud.col_x, hud.ship_y, hud.col_w, hud.ship_h, dt);
-            // Restore 2D ortho — the ship widget swaps to a 3D camera internally.
-            set_ortho(W, H);
-            glDisable(GL_DEPTH_TEST);
-            map_widget_render(hud.col_x, hud.map_y, hud.col_w, hud.map_h, dt);
-        }
-
-        // Chat overlay on top of terminal (not during scenes)
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-        render_chat_overlay(W, H);
+    PauseLayout L = pause_layout(W, H);
+    const char* labels[3] = { "Настройки", "Выйти в меню", "Выйти из игры" };
+    float cols[3][3] = {
+        { 0.12f, 0.18f, 0.30f },
+        { 0.20f, 0.16f, 0.06f },
+        { 0.26f, 0.07f, 0.07f },
+    };
+    for (int i = 0; i < 3; ++i) {
+        bool hot = in_rect((float)g_mouse_x, (float)g_mouse_y, L.bx, L.by[i], L.bw, L.bh);
+        float m = hot ? 1.6f : 1.0f;
+        draw_rect(L.bx, L.by[i], L.bw, L.bh, cols[i][0]*m, cols[i][1]*m, cols[i][2]*m);
+        glDisable(GL_TEXTURE_2D);
+        glColor3f(0.4f, 0.5f, 0.7f); glLineWidth(1.2f);
+        glBegin(GL_LINE_LOOP);
+            glVertex2f(L.bx, L.by[i]); glVertex2f(L.bx + L.bw, L.by[i]);
+            glVertex2f(L.bx + L.bw, L.by[i] + L.bh); glVertex2f(L.bx, L.by[i] + L.bh);
+        glEnd();
+        draw_string(L.bx + L.bw * 0.5f - string_width(labels[i]) * 0.5f,
+                    L.by[i] + L.bh * 0.5f - g_font_size * 0.5f,
+                    labels[i], 0.88f, 0.92f, 1.0f);
     }
-
-    // Settings overlay renders on top of whatever is visible (except login)
-    if (g_screen != Screen::LOGIN && g_settings_open) {
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-        settings_render(W, H);
-    }
-
-    // Stats overlay (also on top, but takes priority over settings in key handling)
-    if (g_screen != Screen::LOGIN && g_stat_open) {
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-        stat_render(W, H);
-    }
-
-    // Scrollback overlay
-    if (g_screen != Screen::LOGIN && g_scr_open) {
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-        scr_render(W, H);
-    }
-
-    // Report overlay (staff inbox / player view)
-    if (g_screen != Screen::LOGIN && g_report_open) {
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-        report_render(W, H);
-    }
-
-    // Galaxy map overlay
-    if (g_screen != Screen::LOGIN && g_map_open) {
-        set_ortho(W, H);
-        glDisable(GL_DEPTH_TEST);
-        map_render(W, H, dt);
-    }
+    const char* hint = "Esc - закрыть меню";
+    draw_string(W * 0.5f - string_width(hint) * 0.5f, L.by[2] + L.bh + 24,
+                hint, 0.4f, 0.5f, 0.65f);
 }
 
-// ─── Input callbacks ──────────────────────────────────────────────────────────
+// ─── Top-level render ─────────────────────────────────────────────────────────
+void terminal_render(int W, int H, float dt) {
+    if (g_screen == Screen::LOGIN) {
+        render_login(W, H);
+        return;
+    }
+    if (g_riding) render_cockpit(W, H);
+    else          render_world(W, H, dt);
+
+    if (g_settings_open) settings_render(W, H);
+    if (g_pause_menu && !g_settings_open) render_pause_menu(W, H);
+}
+
+// ─── Input ────────────────────────────────────────────────────────────────────
 void terminal_cb_char(GLFWwindow*, unsigned int cp) {
     if (g_screen == Screen::LOGIN) {
-        // Accept printable ASCII only for login fields
         if (cp >= 32 && cp < 127) {
-            // Nickname: restrict to the server's allowed set (letters/digits/_-.)
-            if (g_focused_login == 0) {
-                bool ok = (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
-                          (cp >= '0' && cp <= '9') || cp == '_' || cp == '-' || cp == '.';
-                if (!ok) return;
-            }
-            if (g_focused_login == 0 && (int)g_field_nick.size() < NICKNAME_MAX_LEN-1)
-                g_field_nick += (char)cp;
-            else if (g_focused_login == 1 && (int)g_field_pass.size() < PASSWORD_MAX_LEN-1)
-                g_field_pass += (char)cp;
+            std::string& f = (g_focused_login == 0) ? g_field_nick : g_field_pass;
+            if (f.size() < 60) f += (char)cp;
         }
         return;
     }
-    // Terminal: accept any UTF-8 char via codepoint
-    if (cp >= 32 && (int)g_input_buf.size() < MESSAGE_MAX_LEN-1) {
-        sound_play(SoundEvent::KEY_TYPE);
-        // Encode codepoint to UTF-8
-        if (cp < 0x80) {
-            g_input_buf += (char)cp;
-        } else if (cp < 0x800) {
-            g_input_buf += (char)(0xC0 | (cp >> 6));
-            g_input_buf += (char)(0x80 | (cp & 0x3F));
-        } else {
-            g_input_buf += (char)(0xE0 | (cp >> 12));
-            g_input_buf += (char)(0x80 | ((cp >> 6) & 0x3F));
-            g_input_buf += (char)(0x80 | (cp & 0x3F));
-        }
+    if (g_term_open && cp >= 32 && cp < 127) {
+        if (g_input_buf.size() < 200) g_input_buf += (char)cp;
     }
 }
 
@@ -823,499 +602,123 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
     if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
 
     if (g_screen == Screen::LOGIN) {
-        if (key == GLFW_KEY_ESCAPE)  { g_running = false; return; }
-        if (key == GLFW_KEY_TAB)     { g_focused_login ^= 1; return; }
-        if (key == GLFW_KEY_BACKSPACE) {
-            if (g_focused_login == 0 && !g_field_nick.empty()) g_field_nick.pop_back();
-            if (g_focused_login == 1 && !g_field_pass.empty()) g_field_pass.pop_back();
-            return;
-        }
-        if (key == GLFW_KEY_V && (mods & GLFW_MOD_CONTROL)) {
-            const char* clip = glfwGetClipboardString(win);
-            if (clip) {
-                std::string& field = (g_focused_login == 0) ? g_field_nick : g_field_pass;
-                int max_len = (g_focused_login == 0) ? NICKNAME_MAX_LEN - 1 : PASSWORD_MAX_LEN - 1;
-                bool nick_field = (g_focused_login == 0);
-                for (const char* p = clip; *p && (int)field.size() < max_len; ++p) {
-                    unsigned char c = (unsigned char)*p;
-                    if (c < 32 || c >= 127) continue;  // printable ASCII only
-                    if (nick_field) {
-                        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                                  (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
-                        if (!ok) continue;
-                    }
-                    field += (char)c;
-                }
-            }
-            return;
-        }
-        if (key == GLFW_KEY_A && (mods & GLFW_MOD_CONTROL)) {
-            if (g_focused_login == 0) g_field_nick.clear();
-            else                      g_field_pass.clear();
-            return;
-        }
-        if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
-            login_submit(win, false);
-            return;
-        }
-        if (key == GLFW_KEY_F2) {
-            login_submit(win, true);
-            return;
+        if (key == GLFW_KEY_ESCAPE) { g_running = false; glfwSetWindowShouldClose(win, 1); }
+        else if (key == GLFW_KEY_TAB)   g_focused_login ^= 1;
+        else if (key == GLFW_KEY_ENTER) login_submit(false);
+        else if (key == GLFW_KEY_F2)    login_submit(true);
+        else if (key == GLFW_KEY_BACKSPACE) {
+            std::string& f = (g_focused_login == 0) ? g_field_nick : g_field_pass;
+            if (!f.empty()) f.pop_back();
         }
         return;
     }
 
-    // Map overlay has top priority while open
-    if (g_map_open) {
-        map_on_key(key, action);
-        return;
-    }
+    // WORLD / cockpit
 
-    // Report overlay has top priority while open
-    if (g_report_open) {
-        report_on_key(key, action);
-        return;
-    }
-
-    // Stats overlay has priority over settings
-    if (g_stat_open) {
-        stat_on_key(key, action);
-        return;
-    }
-
-    // Scrollback overlay has priority over settings
-    if (g_scr_open) {
-        scr_on_key(key, action);
-        return;
-    }
-
-    // Settings overlay consumes all keys while open
+    // Settings overlay (opened from the pause menu) gets first crack at keys.
     if (g_settings_open) {
-        settings_on_key(key, action);
+        if (key == GLFW_KEY_ESCAPE) g_settings_open = false;  // back to pause menu
+        else settings_on_key(key, GLFW_PRESS);
         return;
     }
 
-    // Terminal mode
-    if (key == GLFW_KEY_ESCAPE) {
-        std::lock_guard<std::mutex> lock(g_state_mutex);
-        if (g_scene.active) { g_scene.active = false; return; }
-        return;
-    }
-    if (key == GLFW_KEY_BACKSPACE) {
-        if (!g_input_buf.empty()) {
-            // Pop UTF-8 char from end
-            while (!g_input_buf.empty() && (g_input_buf.back() & 0xC0) == 0x80)
-                g_input_buf.pop_back();
-            if (!g_input_buf.empty()) g_input_buf.pop_back();
-            sound_play(SoundEvent::BACKSPACE);
-        }
+    // Pause menu: Esc toggles it shut.
+    if (g_pause_menu) {
+        if (key == GLFW_KEY_ESCAPE) g_pause_menu = false;
         return;
     }
 
-    // Text editing: Ctrl+A (select all), Ctrl+X (cut), Ctrl+C (copy), Ctrl+V (paste)
-    if (key == GLFW_KEY_A && (mods & GLFW_MOD_CONTROL)) {
-        // Ctrl+A: mark entire input as selected (visual only for now)
-        // For simplicity, just select all by moving cursor logic
-        // We'll store selection state if needed, but for MVP just select-all for copy
-        g_input_selection_all = true;
-        return;
-    }
-    if (key == GLFW_KEY_X && (mods & GLFW_MOD_CONTROL)) {
-        // Ctrl+X: cut (copy to clipboard and clear)
-        if (!g_input_buf.empty()) {
-#ifdef _WIN32
-            if (OpenClipboard(nullptr)) {
-                HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, g_input_buf.size() + 1);
-                if (h) {
-                    char* p = (char*)GlobalLock(h);
-                    std::strcpy(p, g_input_buf.c_str());
-                    GlobalUnlock(h);
-                    EmptyClipboard();
-                    SetClipboardData(CF_TEXT, h);
-                    CloseClipboard();
-                }
-            }
-#endif
-            g_input_buf.clear();
-            g_input_selection_all = false;
-        }
-        return;
-    }
-    if (key == GLFW_KEY_C && (mods & GLFW_MOD_CONTROL)) {
-        // Ctrl+C: copy to clipboard
-        if (!g_input_buf.empty()) {
-#ifdef _WIN32
-            if (OpenClipboard(nullptr)) {
-                HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, g_input_buf.size() + 1);
-                if (h) {
-                    char* p = (char*)GlobalLock(h);
-                    std::strcpy(p, g_input_buf.c_str());
-                    GlobalUnlock(h);
-                    EmptyClipboard();
-                    SetClipboardData(CF_TEXT, h);
-                    CloseClipboard();
-                }
-            }
-#endif
-        }
-        return;
-    }
-    if (key == GLFW_KEY_V && (mods & GLFW_MOD_CONTROL)) {
-        // Ctrl+V: paste from clipboard
-#ifdef _WIN32
-        if (OpenClipboard(nullptr)) {
-            HANDLE h = GetClipboardData(CF_TEXT);
-            if (h) {
-                const char* text = (const char*)GlobalLock(h);
-                if (text) {
-                    // Append clipboard to input (up to MESSAGE_MAX_LEN)
-                    size_t room = MESSAGE_MAX_LEN - 1 - g_input_buf.size();
-                    size_t to_paste = std::min(room, std::strlen(text));
-                    g_input_buf.append(text, to_paste);
-                    GlobalUnlock(h);
-                }
-            }
-            CloseClipboard();
-        }
-#endif
-        g_input_selection_all = false;
-        return;
-    }
-    if (key == GLFW_KEY_ENTER || key == GLFW_KEY_KP_ENTER) {
-        if (g_warping) {
-            std::lock_guard<std::mutex> lk(g_state_mutex);
-            g_lines.push_back({"  [warp] Navigation locked during jump sequence.", 180, 120, 60});
-            return;
-        }
-        if (!g_input_buf.empty()) {
-            // Check for local-only commands first
-            {
-                std::string trimmed = g_input_buf;
-                size_t s = trimmed.find_first_not_of(" \t");
-                if (s != std::string::npos) trimmed = trimmed.substr(s);
-                std::string lc;
-                for (auto c : trimmed) lc += (char)std::tolower((unsigned char)c);
-                if (lc == "settings") {
-                    g_settings_open = true;
-                    sound_play(SoundEvent::CMD_CLEAR);
-                    // Save to history
-                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
-                        g_cmd_history.push_back(g_input_buf);
-                    g_history_idx = -1; g_history_saved.clear();
-                    // Echo to terminal
-                    std::string echo;
-                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
-                    { std::lock_guard<std::mutex> lock(g_state_mutex);
-                      g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
-                    g_input_buf.clear();
-                    g_scroll_offset = 0;
-                    return;
-                }
-                // "report" with no argument: open the overlay locally (in this
-                // thread, like settings) so it can't race the network thread,
-                // then ask the server to fill it with data.
-                if (lc == "report") {
-                    report_open_pending();   // opens g_report_open + shows "loading"
-                    sound_play(SoundEvent::CMD_SEND);
-                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
-                        g_cmd_history.push_back(g_input_buf);
-                    g_history_idx = -1; g_history_saved.clear();
-                    std::string echo;
-                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
-                    { std::lock_guard<std::mutex> lock(g_state_mutex);
-                      g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
-                    g_input_buf.clear();
-                    g_scroll_offset = 0;
-                    net_send_input("report");  // server replies with S_REPORT_LIST
-                    return;
-                }
-                if (lc == "map") {
-                    g_map_open = true;
-                    sound_play(SoundEvent::CMD_CLEAR);
-                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
-                        g_cmd_history.push_back(g_input_buf);
-                    g_history_idx = -1; g_history_saved.clear();
-                    std::string echo;
-                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
-                    { std::lock_guard<std::mutex> lock(g_state_mutex);
-                      g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
-                    g_input_buf.clear();
-                    g_scroll_offset = 0;
-                    return;
-                }
-                if (lc == "scr") {
-                    g_scr_open = true;
-                    sound_play(SoundEvent::CMD_CLEAR);
-                    // Save to history
-                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
-                        g_cmd_history.push_back(g_input_buf);
-                    g_history_idx = -1; g_history_saved.clear();
-                    // Echo to terminal
-                    std::string echo;
-                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
-                    { std::lock_guard<std::mutex> lock(g_state_mutex);
-                      g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
-                    g_input_buf.clear();
-                    g_scroll_offset = 0;
-                    return;
-                }
-                if (lc == "stat") {
-                    // Send stat request to server (server will respond with S_STATS packet)
-                    sound_play(SoundEvent::CMD_SEND);
-                    // Save to history
-                    if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf)
-                        g_cmd_history.push_back(g_input_buf);
-                    g_history_idx = -1; g_history_saved.clear();
-                    // Echo to terminal
-                    std::string echo;
-                    { std::lock_guard<std::mutex> lock(g_state_mutex); echo = g_prompt + g_input_buf; }
-                    { std::lock_guard<std::mutex> lock(g_state_mutex);
-                      g_lines.push_back({echo, 120, 160, 120});
-                      if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin()); }
-                    g_input_buf.clear();
-                    g_scroll_offset = 0;
-                    net_send_input("stat");  // Send to server
-                    return;
-                }
-            }
-
-            // Determine sound by command
-            std::string cmd = g_input_buf;
-            // lowercase first word
-            std::string lcmd;
-            for (auto c : cmd) lcmd += (char)std::tolower((unsigned char)c);
-            size_t sp = lcmd.find(' ');
-            std::string first = (sp == std::string::npos) ? lcmd : lcmd.substr(0, sp);
-            if (first == "clear")
-                sound_play(SoundEvent::CMD_CLEAR);
-            else if (first == "stars" || first == "warp")
-                sound_play(SoundEvent::CMD_STARS);
-            else if (first == "logout")
-                sound_play(SoundEvent::CMD_LOGOUT);
-            else
-                sound_play(SoundEvent::CMD_SEND);
-
-            // Echo input to terminal
-            std::string echo;
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                echo = g_prompt + g_input_buf;
-            }
-            {
-                std::lock_guard<std::mutex> lock(g_state_mutex);
-                g_lines.push_back({echo, 120, 160, 120});
-                if ((int)g_lines.size() > g_term_buf_size)
-                    g_lines.erase(g_lines.begin());
-            }
-            // Save to history (skip empty and exact duplicate of last entry)
-            if (g_cmd_history.empty() || g_cmd_history.back() != g_input_buf) {
-                g_cmd_history.push_back(g_input_buf);
-                if ((int)g_cmd_history.size() > 50)
-                    g_cmd_history.erase(g_cmd_history.begin());
-            }
-            g_history_idx   = -1;
-            g_history_saved.clear();
-
-            net_send_input(g_input_buf);
-            g_input_buf.clear();
-            g_scroll_offset = 0;
-        }
-        return;
-    }
-    // Command history navigation (Up/Down arrows)
-    if (key == GLFW_KEY_UP) {
-        if (g_cmd_history.empty()) return;
-        if (g_history_idx == -1) {
-            g_history_saved = g_input_buf;
-            g_history_idx = (int)g_cmd_history.size() - 1;
-        } else if (g_history_idx > 0) {
-            --g_history_idx;
-        }
-        g_input_buf = g_cmd_history[g_history_idx];
-        return;
-    }
-    if (key == GLFW_KEY_DOWN) {
-        if (g_history_idx == -1) return;
-        if (g_history_idx < (int)g_cmd_history.size() - 1) {
-            ++g_history_idx;
-            g_input_buf = g_cmd_history[g_history_idx];
-        } else {
-            g_history_idx = -1;
-            g_input_buf = g_history_saved;
-        }
+    // Ship terminal input line.
+    if (g_term_open) {
+        if (key == GLFW_KEY_ENTER) {
+            std::string cmd = g_input_buf; g_input_buf.clear(); g_term_open = false;
+            if (!cmd.empty()) net_send_command(cmd);
+        } else if (key == GLFW_KEY_ESCAPE) { g_term_open = false; g_input_buf.clear(); }
+        else if (key == GLFW_KEY_BACKSPACE && !g_input_buf.empty()) g_input_buf.pop_back();
         return;
     }
 
-    // ── Tab autocomplete ──────────────────────────────────────────────────────
-    if (key == GLFW_KEY_TAB) {
-        // Build command list based on player access level
-        // g_player_access: 0=admin, 1=mod, 2=helper, 3=user
-        struct CmdEntry { const char* cmd; int min_access; };
-        static const CmdEntry ALL_CMDS[] = {
-            { "help",       3 },
-            { "welcome",    3 },
-            { "logo",       3 },
-            { "ru",         3 },
-            { "eng",        3 },
-            { "who",        3 },
-            { "scan",       3 },
-            { "scan dock",  3 },
-            { "dock to",    3 },
-            { "undock",     3 },
-            { "stat",       3 },
-            { "say",        3 },
-            { "warp",       3 },
-            { "scr",        3 },
-            { "map",        3 },
-            { "clear",      3 },
-            { "stars",      3 },
-            { "settings",   3 },
-            { "logout",     3 },
-            { "exit",       3 },
-            { "report",     3 },
-            { "admin",      2 },  // helper+
-            { "admin help",     2 },
-            { "admin users",    2 },
-            { "admin who",      2 },
-            { "admin info",     2 },
-            { "admin logs",     2 },
-            { "admin kick",     2 },  // staff
-            { "admin mute",     2 },
-            { "admin unmute",   2 },
-            { "admin announce", 2 },
-            { "admin station rename", 0 },
-            { "admin setaccess",0 },  // admin only
-            { "admin ban",      0 },  // admin only
-            { "admin unban",    0 },  // admin only
-            { "reply",          2 },  // staff
-        };
-
-        std::string prefix;
-        { std::lock_guard<std::mutex> lock(g_state_mutex); prefix = g_input_buf; }
-
-        // Lower-case prefix for matching
-        std::string lc_prefix = prefix;
-        for (auto& c : lc_prefix) c = (char)std::tolower((unsigned char)c);
-
-        std::vector<std::string> matches;
-        int access;
-        { std::lock_guard<std::mutex> lock(g_state_mutex); access = g_player_access; }
-        for (auto& e : ALL_CMDS) {
-            if (access > e.min_access) continue;  // not enough access
-            std::string ec = e.cmd;
-            if (ec.substr(0, lc_prefix.size()) == lc_prefix)
-                matches.push_back(ec);
-        }
-
-        if (matches.empty()) return;
-
-        if (matches.size() == 1) {
-            // Complete the input
-            std::lock_guard<std::mutex> lock(g_state_mutex);
-            g_input_buf = matches[0];
-        } else {
-            // Show all matches as a hint line in the terminal
-            std::string hint = "  ";
-            for (size_t i = 0; i < matches.size(); ++i) {
-                if (i) hint += "  ";
-                hint += matches[i];
-            }
-            std::lock_guard<std::mutex> lock(g_state_mutex);
-            g_lines.push_back({hint, 80, 120, 200});
-            if ((int)g_lines.size() > g_term_buf_size) g_lines.erase(g_lines.begin());
-
-            // Complete common prefix
-            std::string common = matches[0];
-            for (size_t i = 1; i < matches.size(); ++i) {
-                size_t j = 0;
-                while (j < common.size() && j < matches[i].size() && common[j] == matches[i][j]) ++j;
-                common = common.substr(0, j);
-            }
-            if (common.size() > lc_prefix.size())
-                g_input_buf = common;
-        }
-        return;
+    switch (key) {
+    case GLFW_KEY_ESCAPE: g_pause_menu = true; break;   // open the pause menu
+    case GLFW_KEY_LEFT:   g_cam_yaw -= 0.08f; break;
+    case GLFW_KEY_RIGHT:  g_cam_yaw += 0.08f; break;
+    case GLFW_KEY_ENTER:  if (g_riding) g_term_open = true; break;
+    case GLFW_KEY_SPACE:  if (g_riding) net_send_interact(OBJECT_SHIP); break;
+    default: break;
     }
-
-    // Scroll
-    if (key == GLFW_KEY_PAGE_UP)   { g_scroll_offset += 5; return; }
-    if (key == GLFW_KEY_PAGE_DOWN) { g_scroll_offset = std::max(0, g_scroll_offset-5); return; }
-    (void)win;
-}
-
-void terminal_cb_cursor_pos(GLFWwindow* win, double mx, double my) {
-    if (g_settings_open)
-        settings_on_cursor((float)mx, (float)my);
-    (void)win;
 }
 
 void terminal_cb_mouse_button(GLFWwindow* win, int button, int action, int) {
-    double mx, my;
-    glfwGetCursorPos(win, &mx, &my);
-
-    // Cursor pos is in window coords; the UI is laid out in framebuffer coords.
-    // Scale so clicks land correctly on HiDPI / scaled displays.
-    int ww, wh, fw, fh;
-    glfwGetWindowSize(win, &ww, &wh);
-    glfwGetFramebufferSize(win, &fw, &fh);
-    if (ww > 0 && wh > 0) {
-        mx *= (double)fw / ww;
-        my *= (double)fh / wh;
-    }
-
-    if (g_settings_open) {
-        settings_on_mouse_button((float)mx, (float)my, button, action);
-        return;
-    }
-
-    // ── Login screen: clickable fields, checkboxes and buttons ────────────────
     if (g_screen == Screen::LOGIN) {
-        if (button != GLFW_MOUSE_BUTTON_LEFT || action != GLFW_PRESS) return;
-        LoginLayout L = login_layout(fw, fh);
-        float fmx = (float)mx, fmy = (float)my;
-
-        if (in_rect(fmx, fmy, L.fX, L.fY1, L.fW, L.fH)) { g_focused_login = 0; return; }
-        if (in_rect(fmx, fmy, L.fX, L.fY2, L.fW, L.fH)) { g_focused_login = 1; return; }
-
-        // "remember login" checkbox (hit area covers box + label)
-        if (in_rect(fmx, fmy, L.cb_login_x, L.cbY, L.fW * 0.5f, L.cb_box)) {
-            g_settings.remember_login = !g_settings.remember_login;
-            if (!g_settings.remember_login) g_settings.remember_pass = false;  // pass implies login
-            settings_save("settings.cfg");
-            saved_login_save("login.cfg");
-            return;
+        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+            int W, H; glfwGetFramebufferSize(win, &W, &H);
+            LoginLayout L = login_layout(W, H);
+            float mx = (float)g_mouse_x, my = (float)g_mouse_y;
+            if (in_rect(mx, my, L.fX, L.fY1, L.fW, L.fH)) g_focused_login = 0;
+            else if (in_rect(mx, my, L.fX, L.fY2, L.fW, L.fH)) g_focused_login = 1;
+            else if (in_rect(mx, my, L.b_login_x, L.bY, L.bW, L.bH)) login_submit(false);
+            else if (in_rect(mx, my, L.b_reg_x, L.bY, L.bW, L.bH)) login_submit(true);
         }
-        // "remember password" checkbox
-        if (in_rect(fmx, fmy, L.cb_pass_x, L.cbY, L.fW * 0.5f, L.cb_box)) {
-            g_settings.remember_pass = !g_settings.remember_pass;
-            if (g_settings.remember_pass) g_settings.remember_login = true;  // implies login
-            settings_save("settings.cfg");
-            saved_login_save("login.cfg");
-            return;
-        }
-
-        if (in_rect(fmx, fmy, L.b_login_x, L.bY, L.bW, L.bH)) { login_submit(win, false); return; }
-        if (in_rect(fmx, fmy, L.b_reg_x,   L.bY, L.bW, L.bH)) { login_submit(win, true);  return; }
         return;
+    }
+
+    int W, H; glfwGetFramebufferSize(win, &W, &H);
+
+    // Settings overlay (from pause menu) consumes clicks.
+    if (g_settings_open) {
+        settings_on_mouse_button((float)g_mouse_x, (float)g_mouse_y, button, action);
+        return;
+    }
+
+    // Pause menu buttons.
+    if (g_pause_menu) {
+        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+            PauseLayout L = pause_layout(W, H);
+            float mx = (float)g_mouse_x, my = (float)g_mouse_y;
+            if (in_rect(mx, my, L.bx, L.by[0], L.bw, L.bh)) {        // Settings
+                g_settings_open = true;
+            } else if (in_rect(mx, my, L.bx, L.by[1], L.bw, L.bh)) { // Leave to menu
+                g_pause_menu = false;
+                g_settings_open = false;
+                net_logout();
+            } else if (in_rect(mx, my, L.bx, L.by[2], L.bw, L.bh)) { // Quit game
+                g_running = false;
+                glfwSetWindowShouldClose(win, 1);
+            }
+        }
+        return;
+    }
+
+    if (g_riding) return;  // cockpit: no world clicks
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        int tx, ty; screen_to_tile(g_mouse_x, g_mouse_y, W, H, tx, ty);
+        if (tx >= 0) {
+            // Clicking the ship tile boards it if adjacent; else just walk there.
+            if (tx == g_sector.ship_tile_x && ty == g_sector.ship_tile_y)
+                net_send_interact(OBJECT_SHIP);
+            else
+                net_send_move(tx, ty);
+        }
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        int tx, ty; screen_to_tile(g_mouse_x, g_mouse_y, W, H, tx, ty);
+        if (tx == g_sector.ship_tile_x && ty == g_sector.ship_tile_y)
+            net_send_interact(OBJECT_SHIP);
+        else { g_rotating = true; g_rot_last_x = g_mouse_x; }
+    } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_RELEASE) {
+        g_rotating = false;
     }
 }
 
-void terminal_cb_scroll(GLFWwindow*, double /*xoffset*/, double yoffset) {
-    if (g_map_open) {
-        map_on_scroll(yoffset);
-        return;
+void terminal_cb_cursor_pos(GLFWwindow*, double mx, double my) {
+    g_mouse_x = (int)mx; g_mouse_y = (int)my;
+    if (g_rotating) {
+        g_cam_yaw += (float)((mx - g_rot_last_x) * 0.01);
+        g_rot_last_x = mx;
     }
-    if (g_scr_open) {
-        scr_on_scroll(yoffset);
-        return;
-    }
-    // Scroll main terminal buffer
-    std::lock_guard<std::mutex> lock(g_state_mutex);
-    int total = (int)g_lines.size();
-    int delta = (yoffset > 0) ? 3 : -3;
-    g_scroll_offset = std::clamp(g_scroll_offset + delta, 0, std::max(0, total - 1));
+}
+
+void terminal_cb_scroll(GLFWwindow*, double, double yoff) {
+    g_cam_dist -= (float)yoff * 1.5f;
+    g_cam_dist = std::clamp(g_cam_dist, 6.0f, 40.0f);
 }
