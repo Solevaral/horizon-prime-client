@@ -71,6 +71,15 @@ void net_send_interact(uint8_t object_id, uint8_t action) {
     net_send(&p, sizeof(PacketHeader) + 2);
 }
 
+void net_send_menu_pick(uint8_t menu_id, uint8_t action) {
+    PktMenuPick p{};
+    p.header.type     = MsgType::C_MENU_PICK;
+    p.header.body_len = htons(2);
+    p.menu_id = menu_id;
+    p.action  = action;
+    net_send(&p, sizeof(PacketHeader) + 2);
+}
+
 void net_send_chat(const std::string& text) {
     uint16_t body = MESSAGE_MAX_LEN;
     std::vector<char> pkt(sizeof(PacketHeader) + body, 0);
@@ -141,6 +150,7 @@ static void reset_to_login() {
     g_input_buf.clear();
     g_term_open = false;
     g_pause_menu = false;
+    g_menu.open = false;
     g_authed    = false;
     g_player_id = 0;
     g_player_nick.clear();
@@ -229,14 +239,18 @@ void network_thread_func(const std::string& host, const std::string& port) {
                 g_sector.sector_x    = rd(0);
                 g_sector.sector_y    = rd(4);
                 g_sector.sector_z    = rd(8);
-                g_sector.tiles_x     = rd(12);
-                g_sector.tiles_y     = rd(16);
-                g_sector.ship_tile_x = rd(20);
-                g_sector.ship_tile_y = rd(24);
-                g_sector.star_class  = body[28];
+                g_sector.location    = rd(12);
+                g_sector.tiles_x     = rd(16);
+                g_sector.tiles_y     = rd(20);
+                g_sector.ship_tile_x = rd(24);
+                g_sector.ship_tile_y = rd(28);
+                g_sector.star_class  = body[32];
                 char nm[49] = {};
-                std::memcpy(nm, body.data() + 29, std::min((size_t)48, body.size() - 29));
+                std::memcpy(nm, body.data() + 33, std::min((size_t)48, body.size() - 33));
                 g_sector.star_name = nm;
+                // A fresh location: drop any open menu and clear stale entities.
+                g_menu.open = false;
+                g_entities.clear();
                 break;
             }
 
@@ -281,6 +295,32 @@ void network_thread_func(const std::string& host, const std::string& port) {
             case MsgType::S_RIDE_STATE: {
                 bool riding = (!body.empty() && body[0] == 1);
                 g_riding = riding;
+                break;
+            }
+
+            case MsgType::S_OPEN_MENU: {
+                if (body.size() < 2 + MENU_LABEL_LEN) break;
+                std::lock_guard<std::mutex> lock(g_state_mutex);
+                g_menu.items.clear();
+                g_menu.menu_id = (uint8_t)body[0];
+                uint8_t cnt = (uint8_t)body[1];
+                char title[MENU_LABEL_LEN + 1] = {};
+                std::memcpy(title, body.data() + 2, MENU_LABEL_LEN);
+                g_menu.title = title;
+                const size_t ITEM = 2 + MENU_LABEL_LEN;   // action+enabled+label
+                size_t base = 2 + MENU_LABEL_LEN;
+                for (uint8_t i = 0; i < cnt && i < MENU_MAX_ITEMS; ++i) {
+                    size_t off = base + (size_t)i * ITEM;
+                    if (off + ITEM > body.size()) break;
+                    UiMenuItem it;
+                    it.action  = (uint8_t)body[off];
+                    it.enabled = body[off + 1] != 0;
+                    char lab[MENU_LABEL_LEN + 1] = {};
+                    std::memcpy(lab, body.data() + off + 2, MENU_LABEL_LEN);
+                    it.label = lab;
+                    g_menu.items.push_back(std::move(it));
+                }
+                g_menu.open = true;
                 break;
             }
 

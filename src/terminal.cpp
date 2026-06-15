@@ -6,6 +6,7 @@
 #include "net.h"
 #include "sound.h"
 #include "settings.h"
+#include "protocol/station.h"
 
 #include <glad/glad.h>
 #define GLFW_INCLUDE_NONE
@@ -425,9 +426,57 @@ static void render_cockpit(int W, int H) {
     draw_string(vx + 16, H - 40 + 6, hint, 0.35f, 0.45f, 0.60f);
 }
 
+// Deep-space backdrop: a vertical gradient + a fixed starfield + a faint nebula
+// glow, drawn in 2D behind the 3D scene. Gives the station something to sit in
+// front of instead of flat black.
+static void render_space_backdrop(int W, int H) {
+    glDisable(GL_DEPTH_TEST);
+    set_ortho(W, H);
+    // Gradient sky.
+    glDisable(GL_TEXTURE_2D);
+    glBegin(GL_QUADS);
+        glColor3f(0.02f, 0.03f, 0.07f); glVertex2f(0, 0);     glVertex2f((float)W, 0);
+        glColor3f(0.05f, 0.04f, 0.10f); glVertex2f((float)W, (float)H); glVertex2f(0, (float)H);
+    glEnd();
+    // Nebula glow blobs.
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    auto blob = [&](float cx, float cy, float rad, float r, float g, float b) {
+        glBegin(GL_TRIANGLE_FAN);
+        glColor4f(r, g, b, 0.18f); glVertex2f(cx, cy);
+        glColor4f(r, g, b, 0.0f);
+        for (int i = 0; i <= 24; ++i) {
+            float a = i / 24.0f * 2.0f * PI;
+            glVertex2f(cx + std::cos(a) * rad, cy + std::sin(a) * rad);
+        }
+        glEnd();
+    };
+    blob(W * 0.25f, H * 0.30f, H * 0.45f, 0.20f, 0.10f, 0.35f);
+    blob(W * 0.78f, H * 0.65f, H * 0.40f, 0.08f, 0.18f, 0.30f);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    // Fixed stars (deterministic seed so they don't shimmer frame to frame).
+    // NOTE: glPointSize MUST be set outside glBegin/glEnd — inside, it is an
+    // invalid GL command and is silently ignored, so the point size would be
+    // whatever leftover state the previous screen left behind (that was the
+    // "stars look different before vs after the cockpit" bug).
+    glPointSize(2.0f);
+    srand(0x5EED5);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < 420; ++i) {
+        float br = 0.3f + (rand() % 70) / 100.0f;
+        glColor3f(br, br, br * 1.05f);
+        glVertex2f((float)(rand() % W), (float)(rand() % H));
+    }
+    glEnd();
+    glPointSize(1.0f);   // restore default for any later point draws
+}
+
 static void render_world(int W, int H, float dt) {
     glClearColor(0.01f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Backdrop first (2D, no depth), then the 3D scene on top.
+    render_space_backdrop(W, H);
+    glClear(GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
 
     // Update interpolated render positions and find the player's focus point.
@@ -452,30 +501,59 @@ static void render_world(int W, int H, float dt) {
     glMatrixMode(GL_PROJECTION); glLoadMatrixf(g_proj);
     glMatrixMode(GL_MODELVIEW);  glLoadMatrixf(g_view);
 
-    int TX = g_sector.tiles_x, TY = g_sector.tiles_y;
+    int loc = g_sector.location;
+    int N = g_sector.tiles_x;
 
-    // Ground grid (checker tiles).
+    // Floor: every walkable tile in this location (open space past the walls
+    // shows the starfield backdrop, OSRS-floor style).
     glDisable(GL_TEXTURE_2D);
     glBegin(GL_QUADS);
-    for (int ty = 0; ty < TY; ++ty)
-        for (int tx = 0; tx < TX; ++tx) {
+    for (int ty = 0; ty < N; ++ty)
+        for (int tx = 0; tx < N; ++tx) {
+            if (tile_is_wall(loc, tx, ty)) continue;
             bool dark = ((tx + ty) & 1);
-            if (dark) glColor3f(0.10f, 0.12f, 0.16f);
-            else      glColor3f(0.13f, 0.16f, 0.21f);
+            if (dark) glColor3f(0.11f, 0.13f, 0.17f);
+            else      glColor3f(0.14f, 0.17f, 0.22f);
             float x0=tx-0.5f, x1=tx+0.5f, z0=ty-0.5f, z1=ty+0.5f;
             glVertex3f(x0,0,z0); glVertex3f(x1,0,z0); glVertex3f(x1,0,z1); glVertex3f(x0,0,z1);
         }
     glEnd();
-    // Grid lines
-    glColor3f(0.20f, 0.28f, 0.38f); glLineWidth(1.0f);
+
+    // Grid lines.
+    glColor3f(0.22f, 0.30f, 0.40f); glLineWidth(1.0f);
     glBegin(GL_LINES);
-    for (int i = 0; i <= TX; ++i) { glVertex3f(i-0.5f,0.01f,-0.5f); glVertex3f(i-0.5f,0.01f,TY-0.5f); }
-    for (int j = 0; j <= TY; ++j) { glVertex3f(-0.5f,0.01f,j-0.5f); glVertex3f(TX-0.5f,0.01f,j-0.5f); }
+    for (int i = 0; i <= N; ++i) { glVertex3f(i-0.5f,0.01f,-0.5f); glVertex3f(i-0.5f,0.01f,N-0.5f); }
+    for (int j = 0; j <= N; ++j) { glVertex3f(-0.5f,0.01f,j-0.5f); glVertex3f(N-0.5f,0.01f,j-0.5f); }
     glEnd();
 
-    // The ship (bigger box) at its tile.
-    draw_box((float)g_sector.ship_tile_x, (float)g_sector.ship_tile_y, 0.9f, 1.4f,
-             0.55f, 0.60f, 0.72f);
+    // Walls (tall boxes). Ship walls are tinted warmer (hull interior).
+    float wr = 0.30f, wg = 0.34f, wb = 0.42f;
+    if (loc == LOC_SHIP) { wr = 0.34f; wg = 0.33f; wb = 0.40f; }
+    for (int ty = 0; ty < N; ++ty)
+        for (int tx = 0; tx < N; ++tx)
+            if (tile_is_wall(loc, tx, ty))
+                draw_box((float)tx, (float)ty, 0.5f, 2.0f, wr, wg, wb);
+
+    // Location-specific props.
+    if (loc == LOC_STATION) {
+        int lx, ly; lift_tile(lx, ly);
+        draw_box((float)lx, (float)ly, 0.55f, 0.10f, 0.20f, 0.22f, 0.28f); // pad
+        draw_box((float)lx, (float)ly, 0.40f, 1.3f, 0.35f, 0.65f, 0.95f);  // lift pillar
+        draw_box((float)lx, (float)ly, 0.22f, 1.7f, 0.55f, 0.85f, 1.0f);   // beacon
+    } else if (loc == LOC_HANGAR) {
+        int tx2, ty2; terminal_tile(tx2, ty2);
+        draw_box((float)tx2, (float)ty2, 0.40f, 1.0f, 0.30f, 0.55f, 0.45f); // terminal
+        draw_box((float)tx2, (float)ty2, 0.30f, 1.15f, 0.45f, 0.95f, 0.70f);// screen glow
+        // The player's ship, parked in the hangar (3x5 footprint).
+        int sx, sy; hangar_ship_tile(sx, sy);
+        draw_box((float)sx, (float)sy, 1.4f, 0.2f, 0.16f, 0.18f, 0.22f);    // pad
+        draw_box((float)sx, (float)sy, 1.0f, 1.4f, 0.50f, 0.56f, 0.70f);    // hull
+        draw_box((float)sx, (float)(sy - 1.5f), 0.5f, 1.6f, 0.65f, 0.75f, 0.95f); // nose
+    } else if (loc == LOC_SHIP) {
+        // Mark the airlock door tile so the way out is obvious.
+        int ax, ay; ship_airlock_tile(ax, ay);
+        draw_box((float)ax, (float)ay, 0.42f, 0.12f, 0.20f, 0.55f, 0.30f);
+    }
 
     // Players (boxes). Self is highlighted.
     {
@@ -492,14 +570,20 @@ static void render_world(int W, int H, float dt) {
     set_ortho(W, H);
 
     // HUD
-    char hud[128];
-    std::snprintf(hud, sizeof(hud), "Sector [%d,%d,%d]  Star %s (%c)  Pilots: %d",
-        g_sector.sector_x, g_sector.sector_y, g_sector.sector_z,
+    const char* lname = loc == LOC_SHIP ? "КОРАБЛЬ"
+                      : loc == LOC_HANGAR ? "АНГАР" : "СТАНЦИЯ — 1 этаж";
+    char hud[160];
+    std::snprintf(hud, sizeof(hud), "%s   Сектор [%d,%d,%d]  %s (%c)  Пилотов: %d",
+        lname, g_sector.sector_x, g_sector.sector_y, g_sector.sector_z,
         g_sector.star_name.c_str(), g_sector.star_class, g_online_count.load());
     draw_rect(8, 8, string_width(hud) + 20, 26, 0.0f, 0.0f, 0.0f, 0.5f);
     draw_string(16, 12, hud, 0.7f, 0.85f, 1.0f);
 
-    const char* hint = "ЛКМ - идти   ПКМ по кораблю - сесть   ←→ - камера   колесо - зум   Esc - меню";
+    const char* hint = loc == LOC_STATION
+        ? "ЛКМ - идти / лифт   ←→ - камера   колесо - зум   Esc - меню"
+        : loc == LOC_HANGAR
+        ? "ЛКМ - идти / терминал   ←→ - камера   колесо - зум   Esc - меню"
+        : "ЛКМ - идти / шлюз   Enter - кокпит   ←→ - камера   Esc - меню";
     draw_string(16, H - 28, hint, 0.45f, 0.55f, 0.70f);
 
     // Chat (bottom-left, fades after 8s)
@@ -571,6 +655,50 @@ static void render_pause_menu(int W, int H) {
                 hint, 0.4f, 0.5f, 0.65f);
 }
 
+// ─── Interaction menu (lift / terminal) ───────────────────────────────────────
+struct InterMenuLayout { float x, y, w, rowh; int n; };
+static InterMenuLayout inter_menu_layout(int W, int H) {
+    InterMenuLayout L;
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+    L.n = (int)g_menu.items.size();
+    L.w = 320.0f; L.rowh = 42.0f;
+    float titleh = 36.0f;
+    float total = titleh + L.n * L.rowh + 14.0f;
+    L.x = W * 0.5f - L.w * 0.5f;
+    L.y = H * 0.5f - total * 0.5f;
+    return L;
+}
+static void render_interaction_menu(int W, int H) {
+    set_ortho(W, H);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    draw_rect(0, 0, (float)W, (float)H, 0.0f, 0.0f, 0.0f, 0.45f);
+
+    InterMenuLayout L = inter_menu_layout(W, H);
+    std::lock_guard<std::mutex> lock(g_state_mutex);
+    float titleh = 36.0f;
+    // Panel
+    draw_rect(L.x, L.y, L.w, titleh + L.n * L.rowh + 14.0f, 0.06f, 0.08f, 0.12f, 0.96f);
+    glDisable(GL_TEXTURE_2D); glColor3f(0.35f, 0.45f, 0.65f); glLineWidth(1.4f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(L.x, L.y); glVertex2f(L.x + L.w, L.y);
+        glVertex2f(L.x + L.w, L.y + titleh + L.n * L.rowh + 14.0f);
+        glVertex2f(L.x, L.y + titleh + L.n * L.rowh + 14.0f);
+    glEnd();
+    draw_string(L.x + 14, L.y + 9, g_menu.title.c_str(), 0.75f, 0.88f, 1.0f);
+
+    for (int i = 0; i < L.n; ++i) {
+        auto& it = g_menu.items[i];
+        float ry = L.y + titleh + i * L.rowh + 6;
+        bool hot = it.enabled &&
+                   in_rect((float)g_mouse_x, (float)g_mouse_y, L.x + 8, ry, L.w - 16, L.rowh - 6);
+        if (!it.enabled) draw_rect(L.x + 8, ry, L.w - 16, L.rowh - 6, 0.10f, 0.11f, 0.13f);
+        else             draw_rect(L.x + 8, ry, L.w - 16, L.rowh - 6,
+                                   hot ? 0.16f : 0.10f, hot ? 0.24f : 0.14f, hot ? 0.34f : 0.20f);
+        float r = it.enabled ? 0.88f : 0.42f, g = it.enabled ? 0.92f : 0.45f, b = it.enabled ? 1.0f : 0.50f;
+        draw_string(L.x + 22, ry + (L.rowh - 6) * 0.5f - g_font_size * 0.5f, it.label.c_str(), r, g, b);
+    }
+}
+
 // ─── Top-level render ─────────────────────────────────────────────────────────
 void terminal_render(int W, int H, float dt) {
     if (g_screen == Screen::LOGIN) {
@@ -580,6 +708,7 @@ void terminal_render(int W, int H, float dt) {
     if (g_riding) render_cockpit(W, H);
     else          render_world(W, H, dt);
 
+    if (g_menu.open && !g_settings_open && !g_pause_menu) render_interaction_menu(W, H);
     if (g_settings_open) settings_render(W, H);
     if (g_pause_menu && !g_settings_open) render_pause_menu(W, H);
 }
@@ -628,6 +757,12 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
         return;
     }
 
+    // Interaction menu: Esc closes it.
+    if (g_menu.open) {
+        if (key == GLFW_KEY_ESCAPE) { std::lock_guard<std::mutex> lk(g_state_mutex); g_menu.open = false; }
+        return;
+    }
+
     // Ship terminal input line.
     if (g_term_open) {
         if (key == GLFW_KEY_ENTER) {
@@ -642,8 +777,13 @@ void terminal_cb_key(GLFWwindow* win, int key, int, int action, int mods) {
     case GLFW_KEY_ESCAPE: g_pause_menu = true; break;   // open the pause menu
     case GLFW_KEY_LEFT:   g_cam_yaw -= 0.08f; break;
     case GLFW_KEY_RIGHT:  g_cam_yaw += 0.08f; break;
-    case GLFW_KEY_ENTER:  if (g_riding) g_term_open = true; break;
-    case GLFW_KEY_SPACE:  if (g_riding) net_send_interact(OBJECT_SHIP); break;
+    case GLFW_KEY_ENTER:
+        if (g_riding) g_term_open = true;                   // cockpit: open terminal
+        else if (g_sector.location == LOC_SHIP) net_send_command("sit");  // take the seat
+        break;
+    case GLFW_KEY_SPACE:
+        if (g_riding) net_send_command("stand");            // leave the seat
+        break;
     default: break;
     }
 }
@@ -689,22 +829,58 @@ void terminal_cb_mouse_button(GLFWwindow* win, int button, int action, int) {
         return;
     }
 
+    // Interaction menu (lift floors / terminal): clicks pick an item.
+    if (g_menu.open) {
+        if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+            InterMenuLayout L = inter_menu_layout(W, H);
+            float titleh = 36.0f;
+            uint8_t menu_id, action_id = 0; bool hit = false; bool enabled = false;
+            {
+                std::lock_guard<std::mutex> lock(g_state_mutex);
+                menu_id = g_menu.menu_id;
+                for (int i = 0; i < (int)g_menu.items.size(); ++i) {
+                    float ry = L.y + titleh + i * L.rowh + 6;
+                    if (in_rect((float)g_mouse_x, (float)g_mouse_y,
+                                L.x + 8, ry, L.w - 16, L.rowh - 6)) {
+                        hit = true; enabled = g_menu.items[i].enabled;
+                        action_id = g_menu.items[i].action; break;
+                    }
+                }
+                if (hit) g_menu.open = false;   // close on any item click
+                else { /* click outside: keep open */ }
+            }
+            if (hit && enabled) net_send_menu_pick(menu_id, action_id);
+        } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+            std::lock_guard<std::mutex> lock(g_state_mutex);
+            g_menu.open = false;   // right-click closes the menu
+        }
+        return;
+    }
+
     if (g_riding) return;  // cockpit: no world clicks
 
     if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
         int tx, ty; screen_to_tile(g_mouse_x, g_mouse_y, W, H, tx, ty);
         if (tx >= 0) {
-            // Clicking the ship tile boards it if adjacent; else just walk there.
-            if (tx == g_sector.ship_tile_x && ty == g_sector.ship_tile_y)
-                net_send_interact(OBJECT_SHIP);
-            else
-                net_send_move(tx, ty);
+            // If the clicked tile (or a tile right next to it) holds an
+            // interactable, send an interact — the server walks the character up
+            // to it and acts. Otherwise just walk there.
+            int loc = g_sector.location;
+            uint8_t obj = object_at(loc, tx, ty);
+            if (!obj) {
+                // also catch clicks on an adjacent tile of an object (the prop is
+                // tall, so the ground click often lands one tile off)
+                for (int oy = -1; oy <= 1 && !obj; ++oy)
+                    for (int ox = -1; ox <= 1 && !obj; ++ox)
+                        if (object_at(loc, tx + ox, ty + oy))
+                            obj = object_at(loc, tx + ox, ty + oy);
+            }
+            if (obj) net_send_interact(obj);
+            else     net_send_move(tx, ty);
         }
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
-        int tx, ty; screen_to_tile(g_mouse_x, g_mouse_y, W, H, tx, ty);
-        if (tx == g_sector.ship_tile_x && ty == g_sector.ship_tile_y)
-            net_send_interact(OBJECT_SHIP);
-        else { g_rotating = true; g_rot_last_x = g_mouse_x; }
+        // Right mouse button only orbits the camera now (no ship boarding).
+        g_rotating = true; g_rot_last_x = g_mouse_x;
     } else if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_RELEASE) {
         g_rotating = false;
     }

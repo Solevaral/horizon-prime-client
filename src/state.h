@@ -37,11 +37,22 @@ struct Entity {
 // ─── Sector description (from S_SECTOR_LOAD) ──────────────────────────────────
 struct SectorInfo {
     int  sector_x = 0, sector_y = 0, sector_z = 0;
-    int  tiles_x = 24, tiles_y = 24;
-    int  ship_tile_x = 12, ship_tile_y = 12;
+    int  location = 0;                  // LOC_STATION / LOC_HANGAR / LOC_SHIP
+    int  tiles_x = 48, tiles_y = 48;
+    int  ship_tile_x = 0, ship_tile_y = 0;   // legacy, unused
     char star_class = 'G';
     std::string star_name = "Unknown";
 };
+
+// ─── Interaction menu (from S_OPEN_MENU) ──────────────────────────────────────
+struct UiMenuItem { uint8_t action; bool enabled; std::string label; };
+struct UiMenu {
+    bool        open = false;
+    uint8_t     menu_id = 0;
+    std::string title;
+    std::vector<UiMenuItem> items;
+};
+extern UiMenu g_menu;
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
 extern std::atomic<bool>       g_running;

@@ -12,6 +12,7 @@ bool                    g_authed        = false;
 SectorInfo              g_sector;
 std::unordered_map<uint32_t, Entity> g_entities;
 std::atomic<bool>       g_riding {false};
+UiMenu                  g_menu;
 
 std::vector<TermLine>   g_term;
 std::vector<ChatLine>   g_chat_lines;
